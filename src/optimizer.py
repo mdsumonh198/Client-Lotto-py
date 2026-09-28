@@ -11,10 +11,10 @@ def optimize_with_constraint_generation(
     ticket_size,
     result_size,
     targets,
-    seed_constraint_count=50,
-    max_rounds=35,
+    seed_constraint_count=100,
+    max_rounds=150,                # ৩৫ এর দেয়াল ভেঙে ১৫০ রাউন্ড
     time_limit_seconds=60,
-    max_constraints_per_round=100,
+    max_constraints_per_round=300,  # ১০০ এর জায়গায় ৩০০ ড্র (৩ গুণ দ্রুত কভার হবে)
     progress_callback=None,
 ):
     all_results = all_combinations(number_from, number_to, result_size)
@@ -23,6 +23,7 @@ def optimize_with_constraint_generation(
 
     total_draws = len(all_results)
 
+    # স্মার্ট ইনিশিয়াল সীড ড্র
     step = max(1, total_draws // seed_constraint_count)
     constrained = [all_results[i] for i in range(0, total_draws, step)][:seed_constraint_count]
     seen = set(constrained)
@@ -33,7 +34,6 @@ def optimize_with_constraint_generation(
     last_pct = 0.0
 
     for round_no in range(1, max_rounds + 1):
-        # Calculating... এর বদলে আগের আসল সংখ্যাই লাইভ ধরে রাখা
         if progress_callback:
             progress_callback(
                 round_no=round_no,
@@ -43,7 +43,7 @@ def optimize_with_constraint_generation(
                 covered_draws=last_covered,
                 pending_violations=last_pending,
                 coverage_pct=last_pct,
-                message=f"Solving MIP Round {round_no} with {len(constrained)} constraints..."
+                message=f"MIP Round {round_no}: Solving with {len(constrained)} constraints..."
             )
 
         last = solve_min_tickets(
@@ -81,19 +81,24 @@ def optimize_with_constraint_generation(
                 covered_draws=covered_count,
                 pending_violations=pending_count,
                 coverage_pct=coverage_pct,
-                message=f"Round {round_no} Finished • Progress: {coverage_pct}% • Tickets: {current_tickets}"
+                message=f"Round {round_no} Done • Progress: {coverage_pct}% • Tickets: {current_tickets}"
             )
 
+        # সব ড্র কভার হলে ১০০% সফল সমাপ্তি
         if not violations:
             verification = verify_ticket_set(
                 number_from, number_to, result_size, last["tickets"], targets
             )
+            # বাজেট স্টেপ (Budget Tiers) যুক্ত করা
+            tagged_tickets = _tag_budget_steps(last["tickets"])
             return {
                 "rounds": round_no,
                 **last,
+                "tickets": tagged_tickets,
                 "verification": verification,
             }
 
+        # অর্থোগোনাল ডাইভার্স কনস্ট্রেইন্ট যোগ করা (দ্রুত কভারেজের জন্য)
         random.shuffle(violations)
         added = 0
         for result, _failed in violations:
@@ -110,9 +115,32 @@ def optimize_with_constraint_generation(
     verification = verify_ticket_set(
         number_from, number_to, result_size, last["tickets"], targets
     )
+    tagged_tickets = _tag_budget_steps(last.get("tickets", []))
     return {
         "rounds": max_rounds,
         **(last or {}),
+        "tickets": tagged_tickets,
         "verification": verification,
         "status": "PROVED OPTIMAL" if verification["all_targets_pass"] else "BEST FOUND",
     }
+
+
+def _tag_budget_steps(tickets):
+    """কম বাজেটের ক্লায়েন্টদের জন্য টিকেটগুলোকে স্টেপে ভাগ করা"""
+    total = len(tickets)
+    if total == 0:
+        return []
+    
+    tagged = []
+    step1_cutoff = max(1, int(total * 0.25))
+    step2_cutoff = max(1, int(total * 0.50))
+
+    for i, t in enumerate(tickets, 1):
+        if i <= step1_cutoff:
+            tier = "Step 1 (Starter - 25% Budget)"
+        elif i <= step2_cutoff:
+            tier = "Step 2 (Growth - 50% Budget)"
+        else:
+            tier = "Step 3 (Guaranteed - 100% Budget)"
+        tagged.append((*t, tier))
+    return tagged
