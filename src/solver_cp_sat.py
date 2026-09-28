@@ -1,90 +1,67 @@
-from itertools import combinations
-from ortools.sat.python import cp_model
-from .core import all_combinations, to_mask
+"""Incremental exact CP-SAT model (constraint generation). The model object persists across rounds,
+new result-constraints are appended (no rebuild), and the best known solution is passed as a hint."""
+try:
+    from ortools.sat.python import cp_model
+    HAS_ORTOOLS = True
+except ImportError:            # pragma: no cover
+    cp_model = None
+    HAS_ORTOOLS = False
+
+import numpy as np
+
+from .core import popcount
+
+_INF = 2 ** 62
 
 
-def build_candidates(number_from, number_to, ticket_size):
-    return all_combinations(number_from, number_to, ticket_size)
+class IncrementalModel:
+    def __init__(self, problem):
+        self.p = problem
+        T = problem.n_tickets
+        self.model = cp_model.CpModel()
+        self.x = [self.model.NewBoolVar("") for _ in range(T)]
+        obj = self.model.Proto().objective            # minimise number of tickets
+        obj.vars.extend(range(T))
+        obj.coeffs.extend([1] * T)
+        self.added = set()
 
+    def add_result(self, ridx):
+        ridx = int(ridx)
+        if ridx in self.added:
+            return False
+        self.added.add(ridx)
+        p = self.p
+        ov = popcount(p.tmasks & p.rmasks[ridx])
+        for j, k in enumerate(p.ks):
+            idx = np.flatnonzero(ov == k)
+            ct = self.model.Proto().constraints.add()
+            ct.linear.vars.extend(idx.tolist())
+            ct.linear.coeffs.extend([1] * len(idx))
+            ct.linear.domain.extend([int(p.reqs[j]), _INF])
+        return True
 
-def solve_min_tickets(
-    number_from,
-    number_to,
-    ticket_size,
-    result_size,
-    targets,
-    constrained_results=None,
-    time_limit_seconds=60,
-):
-    tickets = build_candidates(number_from, number_to, ticket_size)
-    ticket_masks = [to_mask(t) for t in tickets]
+    def solve(self, hint_sel, time_limit, workers, gap=0.0, verbose=False):
+        T = self.p.n_tickets
+        self.model.ClearHints()
+        vals = [0] * T
+        for i in hint_sel:
+            vals[i] = 1
+        self.model.Proto().solution_hint.vars.extend(range(T))
+        self.model.Proto().solution_hint.values.extend(vals)
 
-    if constrained_results is None:
-        constrained_results = all_combinations(number_from, number_to, result_size)
-
-    model = cp_model.CpModel()
-    x = [model.NewBoolVar(f"x_{i}") for i in range(len(tickets))]
-
-    for ridx, result in enumerate(constrained_results):
-        rmask = to_mask(result)
-        for k, minimum in targets.items():
-            matching_indices = [i for i, tm in enumerate(ticket_masks) if (tm & rmask).bit_count() == k]
-            if minimum > 0:
-                if len(matching_indices) < minimum:
-                    return {
-                        "status": "INFEASIBLE",
-                        "tickets": [],
-                        "objective": None,
-                        "reason": f"Result {result} cannot reach exact-{k} >= {minimum}",
-                    }
-                model.Add(sum(x[i] for i in matching_indices) >= minimum)
-
-    # দ্রুত ইনিশিয়াল সমাধান দিয়ে ওয়ার্ম স্টার্ট
-    hint_indices = []
-    for r_idx in range(len(constrained_results)):
-        rmask = to_mask(constrained_results[r_idx])
-        for i, tm in enumerate(ticket_masks):
-            if (tm & rmask).bit_count() in targets:
-                hint_indices.append(i)
-                break
-    for h_idx in set(hint_indices):
-        model.AddHint(x[h_idx], 1)
-
-    model.Minimize(sum(x))
-    solver = cp_model.CpSolver()
-    
-    # মেমোরি গার্ড: ২.৫ জিবির বেশি র‍্যাম কখনোই খরচ করবে না
-    solver.parameters.max_memory_in_mb = 2500
-    solver.parameters.num_search_workers = 1
-    
-    if time_limit_seconds:
-        solver.parameters.max_time_in_seconds = float(time_limit_seconds)
-
-    status_code = solver.Solve(model)
-    status_map = {
-        cp_model.OPTIMAL: "PROVED OPTIMAL",
-        cp_model.FEASIBLE: "BEST FOUND",
-        cp_model.INFEASIBLE: "INFEASIBLE",
-        cp_model.MODEL_INVALID: "MODEL INVALID",
-        cp_model.UNKNOWN: "BEST FOUND (TIMEOUT)",
-    }
-    status = status_map.get(status_code, "BEST FOUND")
-
-    selected = []
-    for i in range(len(tickets)):
-        try:
-            if solver.Value(x[i]) == 1:
-                selected.append(tickets[i])
-        except Exception:
-            pass
-
-    if not selected and hint_indices:
-        selected = [tickets[i] for i in set(hint_indices)]
-        status = "BEST FOUND"
-
-    return {
-        "status": status,
-        "tickets": selected,
-        "objective": len(selected) if selected else None,
-        "best_bound": solver.BestObjectiveBound() if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
-    }
+        solver = cp_model.CpSolver()
+        prm = solver.parameters
+        prm.max_time_in_seconds = max(1.0, float(time_limit))
+        prm.num_workers = int(workers)
+        prm.log_search_progress = bool(verbose)
+        if gap and gap > 0:
+            prm.relative_gap_limit = float(gap)
+        code = solver.Solve(self.model)
+        names = {cp_model.OPTIMAL: "OPTIMAL", cp_model.FEASIBLE: "FEASIBLE", cp_model.INFEASIBLE: "INFEASIBLE",
+                 cp_model.MODEL_INVALID: "MODEL_INVALID", cp_model.UNKNOWN: "UNKNOWN"}
+        status = names.get(code, str(code))
+        cand, bound = None, None
+        if code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            cand = [i for i in range(T) if solver.BooleanValue(self.x[i])]
+            bound = solver.BestObjectiveBound()
+        return status, cand, bound
