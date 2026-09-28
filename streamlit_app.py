@@ -23,6 +23,17 @@ st.markdown("""
     .live-card {
         background-color: #111827; border: 1px solid #1f2937;
         border-radius: 8px; padding: 12px; text-align: center;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    }
+    @keyframes pulse-dot {
+        0% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.3; transform: scale(0.85); }
+        100% { opacity: 1; transform: scale(1); }
+    }
+    .live-dot {
+        display: inline-block; width: 9px; height: 9px;
+        background-color: #10b981; border-radius: 50%;
+        margin-right: 5px; animation: pulse-dot 1.5s infinite;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -104,7 +115,7 @@ with col_b2:
         st.session_state.results_output = None
         st.rerun()
 
-# ৪. লাইভ প্রগ্রেস ও ৫টি স্মার্ট মেট্রিক কার্ড
+# ৪. লাইভ প্রগ্রেস ও রিয়েল-টাইম তথ্যবহুল ড্যাশবোর্ড
 if start_btn:
     if not st.session_state.targets:
         st.error("Please add at least one target from the sidebar!")
@@ -116,48 +127,58 @@ if start_btn:
         
         start_time = time.time()
 
-        # লাইভ কলব্যাক ফাংশন
+        # রিয়েল-টাইম UI আপডেট কলব্যাক
         def on_round_update(round_no, max_rounds, tickets_count, total_draws, covered_draws, pending_violations, coverage_pct, message):
             elapsed_sec = int(time.time() - start_time)
             mins, secs = divmod(elapsed_sec, 60)
-            timer_str = f"{mins:02d}:{secs:02d}s"
+            py_time = f"{mins:02d}:{secs:02d}s"
 
-            # আসল কভারেজ শতাংশ দিয়ে প্রগ্রেস বার চলা
+            # আসল কভারেজ দিয়ে প্রগ্রেস বার চলা
             progress_bar.progress(min(100, int(coverage_pct)))
             
+            # প্রগ্রেস স্ট্যাটাস বক্স
             status_box.markdown(f"""
             <div class='metric-card' style='border-left: 4px solid #10b981;'>
-                <strong>🔄 {message}</strong>
+                <strong><span class='live-dot'></span>{message}</strong>
             </div>
             """, unsafe_allow_html=True)
             
-            cov_str = f"{covered_draws:,} ({coverage_pct}%)" if isinstance(covered_draws, int) else str(covered_draws)
-            pen_str = f"{pending_violations:,}" if isinstance(pending_violations, int) else str(pending_violations)
-            
-            # ৫টি সুন্দর লাইভ কার্ড
+            # ৫টি সুন্দর লাইভ কার্ড (আসল বাস্তব সংখ্যা সহ)
             live_metrics.markdown(f"""
             <div style='display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 10px;'>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 12px;'>⏱️ Elapsed Time</div>
-                    <div style='color: #f43f5e; font-size: 18px; font-weight: bold;'>{timer_str}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'><span class='live-dot'></span>Elapsed Time</div>
+                    <div id='live_sec_timer' style='color: #f43f5e; font-size: 19px; font-weight: bold;'>{py_time}</div>
                 </div>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 12px;'>🔄 Current Round</div>
-                    <div style='color: #38bdf8; font-size: 18px; font-weight: bold;'>Round {round_no}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'>🔄 Round Progress</div>
+                    <div style='color: #38bdf8; font-size: 19px; font-weight: bold;'>Round {round_no} / {max_rounds}</div>
                 </div>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 12px;'>🎟️ Selected Tickets</div>
-                    <div style='color: #10b981; font-size: 18px; font-weight: bold;'>{tickets_count}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'>🎟️ Tickets Generated</div>
+                    <div style='color: #10b981; font-size: 19px; font-weight: bold;'>{tickets_count} টি</div>
                 </div>
                 <div class='live-card'>
                     <div style='color: #9ca3af; font-size: 12px;'>✅ Draws Complete</div>
-                    <div style='color: #22c55e; font-size: 18px; font-weight: bold;'>{cov_str}</div>
+                    <div style='color: #22c55e; font-size: 19px; font-weight: bold;'>{covered_draws:,} ({coverage_pct}%)</div>
                 </div>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 12px;'>⚠️ Draws Remaining</div>
-                    <div style='color: #f59e0b; font-size: 18px; font-weight: bold;'>{pen_str}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'>🎯 Draws Remaining</div>
+                    <div style='color: #f59e0b; font-size: 19px; font-weight: bold;'>{pending_violations:,} টি</div>
                 </div>
             </div>
+            <script>
+                if (!window.liveTimerInterval) {{
+                    window.liveStartTime = Date.now() - ({elapsed_sec} * 1000);
+                    window.liveTimerInterval = setInterval(() => {{
+                        let diff = Math.floor((Date.now() - window.liveStartTime) / 1000);
+                        let m = String(Math.floor(diff / 60)).padStart(2, '0');
+                        let s = String(diff % 60).padStart(2, '0');
+                        let el = document.getElementById('live_sec_timer');
+                        if (el) el.innerText = m + ':' + s + 's';
+                    }}, 1000);
+                }}
+            </script>
             """, unsafe_allow_html=True)
 
         try:
