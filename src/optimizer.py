@@ -12,7 +12,7 @@ def optimize_with_constraint_generation(
     result_size,
     targets,
     seed_constraint_count=50,
-    max_rounds=150,
+    max_rounds=35,
     time_limit_seconds=60,
     max_constraints_per_round=100,
     progress_callback=None,
@@ -23,22 +23,26 @@ def optimize_with_constraint_generation(
 
     total_draws = len(all_results)
 
-    # ইনিশিয়াল ডাইভার্স কনস্ট্রেইন্ট
     step = max(1, total_draws // seed_constraint_count)
     constrained = [all_results[i] for i in range(0, total_draws, step)][:seed_constraint_count]
     seen = set(constrained)
     last = None
 
+    last_covered = 0
+    last_pending = total_draws
+    last_pct = 0.0
+
     for round_no in range(1, max_rounds + 1):
+        # Calculating... এর বদলে আগের আসল সংখ্যাই লাইভ ধরে রাখা
         if progress_callback:
             progress_callback(
                 round_no=round_no,
                 max_rounds=max_rounds,
                 tickets_count=len(last["tickets"]) if last and "tickets" in last else 0,
                 total_draws=total_draws,
-                covered_draws="Calculating...",
-                pending_violations="Calculating...",
-                coverage_pct=0,
+                covered_draws=last_covered,
+                pending_violations=last_pending,
+                coverage_pct=last_pct,
                 message=f"Solving MIP Round {round_no} with {len(constrained)} constraints..."
             )
 
@@ -55,7 +59,6 @@ def optimize_with_constraint_generation(
         if last["status"] in ("INFEASIBLE", "MODEL INVALID", "UNKNOWN"):
             return {"rounds": round_no, **last}
 
-        # দ্রুত ভেরিফাই করে ফেইলিউর খোঁজা
         violations = find_violating_results(
             number_from, number_to, result_size, last["tickets"], targets
         )
@@ -64,6 +67,10 @@ def optimize_with_constraint_generation(
         pending_count = len(violations)
         covered_count = total_draws - pending_count
         coverage_pct = round((covered_count / total_draws) * 100, 2)
+
+        last_covered = covered_count
+        last_pending = pending_count
+        last_pct = coverage_pct
 
         if progress_callback:
             progress_callback(
@@ -74,10 +81,9 @@ def optimize_with_constraint_generation(
                 covered_draws=covered_count,
                 pending_violations=pending_count,
                 coverage_pct=coverage_pct,
-                message=f"Round {round_no} Completed | Coverage: {coverage_pct}% | Tickets: {current_tickets}"
+                message=f"Round {round_no} Finished • Progress: {coverage_pct}% • Tickets: {current_tickets}"
             )
 
-        # সব ড্র কভার হয়ে গেলে সমাপ্ত
         if not violations:
             verification = verify_ticket_set(
                 number_from, number_to, result_size, last["tickets"], targets
@@ -88,7 +94,6 @@ def optimize_with_constraint_generation(
                 "verification": verification,
             }
 
-        # স্মার্ট ডাইভার্স কনস্ট্রেইন্ট যোগ করা
         random.shuffle(violations)
         added = 0
         for result, _failed in violations:
@@ -102,7 +107,6 @@ def optimize_with_constraint_generation(
         if added == 0:
             break
 
-    # ফাইনাল ভেরিফিকেশন
     verification = verify_ticket_set(
         number_from, number_to, result_size, last["tickets"], targets
     )
