@@ -113,17 +113,16 @@ with col_b2:
         st.session_state.results_output = None
         st.rerun()
 
-# ৪. মাল্টি-থ্রেডেড রিয়েল-টাইম অপ্টিমাইজেশন
+# ৪. মাল্টি-থ্রেডেড রিয়েল-টাইম অপ্টিমাইজেশন ও শতকরা প্রগ্রেস বার
 if start_btn:
     if not st.session_state.targets:
         st.error("Please add at least one target from the sidebar!")
     else:
         st.session_state.results_output = None
-        progress_bar = st.progress(0)
+        progress_bar = st.progress(0, text="📊 সামগ্রিক অগ্রগতি: 0.00% সম্পন্ন (টার্গেট: ১০০% জিরো-মিস)")
         status_box = st.empty()
         live_metrics = st.empty()
         
-        # থ্রেডের মধ্যে ডেটা শেয়ার করার স্টেট
         shared_state = {
             "round": 1,
             "tickets": 0,
@@ -136,7 +135,6 @@ if start_btn:
             "error": None
         }
 
-        # ব্যাকগ্রাউন্ড কলব্যাক
         def thread_callback(round_no, max_rounds, tickets_count, total_draws, covered_draws, pending_violations, coverage_pct, message):
             shared_state["round"] = round_no
             shared_state["tickets"] = tickets_count
@@ -145,7 +143,6 @@ if start_btn:
             shared_state["pct"] = coverage_pct
             shared_state["message"] = message
 
-        # ব্যাকগ্রাউন্ড ওয়ার্কার থ্রেড
         def solver_worker():
             try:
                 res = optimize_with_constraint_generation(
@@ -159,20 +156,20 @@ if start_btn:
             finally:
                 shared_state["done"] = True
 
-        # সলভার ব্যাকগ্রাউন্ডে স্টার্ট
         worker_thread = threading.Thread(target=solver_worker, daemon=True)
         worker_thread.start()
 
         start_time = time.time()
 
-        # মেইন থ্রেড: প্রতি ১ সেকেন্ড পর পর স্ক্রিন স্মুথভাবে রিফ্রেশ করবে!
         while not shared_state["done"]:
             elapsed_sec = int(time.time() - start_time)
             mins, secs = divmod(elapsed_sec, 60)
             timer_display = f"{mins:02d}:{secs:02d}s"
 
-            pct = min(100, int(shared_state["pct"]))
-            progress_bar.progress(pct)
+            pct_val = min(100.0, max(0.0, float(shared_state["pct"])))
+            
+            # প্রগ্রেস বারের ওপর স্পষ্ট শতাংশ টেক্সট প্রদর্শন
+            progress_bar.progress(int(pct_val), text=f"📊 সামগ্রিক অগ্রগতি: {pct_val:.2f}% সম্পন্ন | আর {100 - pct_val:.2f}% বাকি (টার্গেট: ১০০% জিরো-মিস)")
 
             status_box.markdown(f"""
             <div class='metric-card' style='border-left: 4px solid #10b981;'>
@@ -210,10 +207,9 @@ if start_btn:
             </div>
             """, unsafe_allow_html=True)
 
-            time.sleep(1)  # প্রতি ১ সেকেন্ডে স্মুথ রিফ্রেশ
+            time.sleep(1)
 
-        # সলভার শেষ হলে ফলাফল সংরক্ষণ
-        progress_bar.progress(100)
+        progress_bar.progress(100, text="✅ ১০০% অপ্টিমাইজেশন ও ব্রুট-ফোর্স অডিট সম্পন্ন!")
         elapsed_total = time.time() - start_time
         if shared_state["error"]:
             st.error(f"Optimization error: {shared_state['error']}")
