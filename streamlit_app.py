@@ -113,7 +113,7 @@ with col_b2:
         st.session_state.results_output = None
         st.rerun()
 
-# ৪. মাল্টি-থ্রেডেড রিয়েল-টাইম অপ্টিমাইজেশন ও শতকরা প্রগ্রেস বার
+# ৪. থ্রেড-সেফ মাল্টি-থ্রেডেড রিয়েল-টাইম অপ্টিমাইজেশন
 if start_btn:
     if not st.session_state.targets:
         st.error("Please add at least one target from the sidebar!")
@@ -123,6 +123,14 @@ if start_btn:
         status_box = st.empty()
         live_metrics = st.empty()
         
+        # থ্রেড-সেফ কপি (মেইন থ্রেড থেকে নিরাপদ কপি নেওয়া হলো)
+        safe_from = int(number_from)
+        safe_to = int(number_to)
+        safe_ticket_size = int(ticket_size)
+        safe_result_size = int(result_size)
+        safe_time_limit = int(time_limit)
+        safe_targets = dict(st.session_state.targets)
+
         shared_state = {
             "round": 1,
             "tickets": 0,
@@ -146,8 +154,8 @@ if start_btn:
         def solver_worker():
             try:
                 res = optimize_with_constraint_generation(
-                    int(number_from), int(number_to), int(ticket_size), int(result_size),
-                    st.session_state.targets, time_limit_seconds=int(time_limit),
+                    safe_from, safe_to, safe_ticket_size, safe_result_size,
+                    safe_targets, time_limit_seconds=safe_time_limit,
                     progress_callback=thread_callback
                 )
                 shared_state["output"] = res
@@ -168,7 +176,6 @@ if start_btn:
 
             pct_val = min(100.0, max(0.0, float(shared_state["pct"])))
             
-            # প্রগ্রেস বারের ওপর স্পষ্ট শতাংশ টেক্সট প্রদর্শন
             progress_bar.progress(int(pct_val), text=f"📊 সামগ্রিক অগ্রগতি: {pct_val:.2f}% সম্পন্ন | আর {100 - pct_val:.2f}% বাকি (টার্গেট: ১০০% জিরো-মিস)")
 
             status_box.markdown(f"""
