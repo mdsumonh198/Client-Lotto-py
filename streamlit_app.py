@@ -1,9 +1,11 @@
 import streamlit as st
 import pandas as pd
 import time
+import threading
 from src.core import validate_game, combination_count
 from src.optimizer import optimize_with_constraint_generation
 
+# ১. পেজ কনফিগারেশন ও প্রিমিয়াম ডার্ক স্টাইল
 st.set_page_config(page_title="Universal Lottery Optimizer", page_icon="🛡️", layout="wide")
 
 st.markdown("""
@@ -37,6 +39,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ২. সাইডবার (Universal Game Matrix & Compound Targets)
 with st.sidebar:
     st.header("⚙️ Universal Game Matrix")
     c1, c2 = st.columns(2)
@@ -90,6 +93,7 @@ with st.sidebar:
     st.header("⚡ Optimization Engine Settings")
     time_limit = st.slider("Solver time limit per round (sec):", 10, 300, 60)
 
+# ৩. মূল ড্যাশবোর্ড হেডার
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
     st.markdown("### 🛡️ Universal Lottery / Combination Optimizer")
@@ -109,6 +113,7 @@ with col_b2:
         st.session_state.results_output = None
         st.rerun()
 
+# ৪. মাল্টি-থ্রেডেড রিয়েল-টাইম অপ্টিমাইজেশন
 if start_btn:
     if not st.session_state.targets:
         st.error("Please add at least one target from the sidebar!")
@@ -118,71 +123,105 @@ if start_btn:
         status_box = st.empty()
         live_metrics = st.empty()
         
+        # থ্রেডের মধ্যে ডেটা শেয়ার করার স্টেট
+        shared_state = {
+            "round": 1,
+            "tickets": 0,
+            "covered": 0,
+            "pending": total_draws,
+            "pct": 0.0,
+            "message": "Initializing High-Speed Solver Engine...",
+            "done": False,
+            "output": None,
+            "error": None
+        }
+
+        # ব্যাকগ্রাউন্ড কলব্যাক
+        def thread_callback(round_no, max_rounds, tickets_count, total_draws, covered_draws, pending_violations, coverage_pct, message):
+            shared_state["round"] = round_no
+            shared_state["tickets"] = tickets_count
+            shared_state["covered"] = covered_draws
+            shared_state["pending"] = pending_violations
+            shared_state["pct"] = coverage_pct
+            shared_state["message"] = message
+
+        # ব্যাকগ্রাউন্ড ওয়ার্কার থ্রেড
+        def solver_worker():
+            try:
+                res = optimize_with_constraint_generation(
+                    int(number_from), int(number_to), int(ticket_size), int(result_size),
+                    st.session_state.targets, time_limit_seconds=int(time_limit),
+                    progress_callback=thread_callback
+                )
+                shared_state["output"] = res
+            except Exception as e:
+                shared_state["error"] = str(e)
+            finally:
+                shared_state["done"] = True
+
+        # সলভার ব্যাকগ্রাউন্ডে স্টার্ট
+        worker_thread = threading.Thread(target=solver_worker, daemon=True)
+        worker_thread.start()
+
         start_time = time.time()
 
-        def on_round_update(round_no, max_rounds, tickets_count, total_draws, covered_draws, pending_violations, coverage_pct, message):
+        # মেইন থ্রেড: প্রতি ১ সেকেন্ড পর পর স্ক্রিন স্মুথভাবে রিফ্রেশ করবে!
+        while not shared_state["done"]:
             elapsed_sec = int(time.time() - start_time)
             mins, secs = divmod(elapsed_sec, 60)
-            py_time = f"{mins:02d}:{secs:02d}s"
+            timer_display = f"{mins:02d}:{secs:02d}s"
 
-            progress_bar.progress(min(100, int(coverage_pct)))
-            
+            pct = min(100, int(shared_state["pct"]))
+            progress_bar.progress(pct)
+
             status_box.markdown(f"""
             <div class='metric-card' style='border-left: 4px solid #10b981;'>
-                <strong><span class='live-dot'></span>{message}</strong>
+                <strong><span class='live-dot'></span>{shared_state['message']}</strong>
             </div>
             """, unsafe_allow_html=True)
-            
+
+            cov = shared_state["covered"]
+            cov_str = f"{cov:,} ({shared_state['pct']}%)" if isinstance(cov, int) else str(cov)
+            pen = shared_state["pending"]
+            pen_str = f"{pen:,}" if isinstance(pen, int) else str(pen)
+
             live_metrics.markdown(f"""
             <div style='display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 10px;'>
                 <div class='live-card'>
                     <div style='color: #9ca3af; font-size: 12px;'><span class='live-dot'></span>Elapsed Time</div>
-                    <div id='live_sec_timer' style='color: #f43f5e; font-size: 19px; font-weight: bold;'>{py_time}</div>
+                    <div style='color: #f43f5e; font-size: 19px; font-weight: bold;'>{timer_display}</div>
                 </div>
                 <div class='live-card'>
                     <div style='color: #9ca3af; font-size: 12px;'>🔄 Round</div>
-                    <div style='color: #38bdf8; font-size: 19px; font-weight: bold;'>Round {round_no}</div>
+                    <div style='color: #38bdf8; font-size: 19px; font-weight: bold;'>Round {shared_state['round']}</div>
                 </div>
                 <div class='live-card'>
                     <div style='color: #9ca3af; font-size: 12px;'>🎟️ Tickets Generated</div>
-                    <div style='color: #10b981; font-size: 19px; font-weight: bold;'>{tickets_count} টি</div>
+                    <div style='color: #10b981; font-size: 19px; font-weight: bold;'>{shared_state['tickets']} টি</div>
                 </div>
                 <div class='live-card'>
                     <div style='color: #9ca3af; font-size: 12px;'>✅ Draws Complete</div>
-                    <div style='color: #22c55e; font-size: 19px; font-weight: bold;'>{covered_draws:,} ({coverage_pct}%)</div>
+                    <div style='color: #22c55e; font-size: 19px; font-weight: bold;'>{cov_str}</div>
                 </div>
                 <div class='live-card'>
                     <div style='color: #9ca3af; font-size: 12px;'>🎯 Draws Remaining</div>
-                    <div style='color: #f59e0b; font-size: 19px; font-weight: bold;'>{pending_violations:,} টি</div>
+                    <div style='color: #f59e0b; font-size: 19px; font-weight: bold;'>{pen_str} টি</div>
                 </div>
             </div>
-            <script>
-                if (!window.liveTimerInterval) {{
-                    window.liveStartTime = Date.now() - ({elapsed_sec} * 1000);
-                    window.liveTimerInterval = setInterval(() => {{
-                        let diff = Math.floor((Date.now() - window.liveStartTime) / 1000);
-                        let m = String(Math.floor(diff / 60)).padStart(2, '0');
-                        let s = String(diff % 60).padStart(2, '0');
-                        let el = document.getElementById('live_sec_timer');
-                        if (el) el.innerText = m + ':' + s + 's';
-                    }}, 1000);
-                }}
-            </script>
             """, unsafe_allow_html=True)
 
-        try:
-            out = optimize_with_constraint_generation(
-                int(number_from), int(number_to), int(ticket_size), int(result_size),
-                st.session_state.targets, time_limit_seconds=int(time_limit),
-                progress_callback=on_round_update
-            )
-            progress_bar.progress(100)
-            elapsed = time.time() - start_time
-            st.session_state.results_output = (out, elapsed)
-            st.rerun()
-        except Exception as e:
-            st.error(f"Optimization error: {str(e)}")
+            time.sleep(1)  # প্রতি ১ সেকেন্ডে স্মুথ রিফ্রেশ
 
+        # সলভার শেষ হলে ফলাফল সংরক্ষণ
+        progress_bar.progress(100)
+        elapsed_total = time.time() - start_time
+        if shared_state["error"]:
+            st.error(f"Optimization error: {shared_state['error']}")
+        elif shared_state["output"]:
+            st.session_state.results_output = (shared_state["output"], elapsed_total)
+            st.rerun()
+
+# ৫. ফাইনাল ভেরিফিকেশন রিপোর্ট ও রেজাল্ট প্রদর্শন
 if "results_output" in st.session_state and st.session_state.results_output:
     out, elapsed = st.session_state.results_output
     raw_tickets = out.get("tickets", [])
@@ -222,7 +261,6 @@ if "results_output" in st.session_state and st.session_state.results_output:
         cols = [f"N{i+1}" for i in range(len(raw_tickets[0]) - 1)] + ["Budget Tier"]
         tdf = pd.DataFrame(raw_tickets, columns=cols)
         
-        # বাজেট ফিল্টার (কম বাজেটের ক্লায়েন্টদের জন্য)
         budget_filter = st.selectbox("বাজেট অনুযায়ী টিকেট ফিল্টার করুন:", 
                                      ["সব টিকেট (100% Zero-Miss Guarantee)", 
                                       "Step 1 (Starter - 25% Budget)", 
