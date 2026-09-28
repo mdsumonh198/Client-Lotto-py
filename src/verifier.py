@@ -5,7 +5,6 @@ from .core import all_combinations, to_mask
 
 
 def _popcount_64(x):
-    """NumPy সি-লেভেল দ্রুততম ৬৪-বিট Popcount"""
     m1 = np.uint64(0x5555555555555555)
     m2 = np.uint64(0x3333333333333333)
     m4 = np.uint64(0x0F0F0F0F0F0F0F0F)
@@ -18,12 +17,11 @@ def _popcount_64(x):
     return (x & np.uint64(0x7F)).astype(np.int32)
 
 
-def find_violating_results(number_from, number_to, result_size, tickets, targets):
-    """টার্গেট পূরণ না হওয়া (ফেইল করা) ড্র গুলো দ্রুত খুঁজে বের করা"""
+def find_violating_results(number_from, number_to, result_size, tickets, targets, log_cb=None):
+    """প্রতি ৫০,০০০ ড্র পরপর লাইভ স্ক্রিনে আপডেট পাঠানো যাতে লগ আটকে না থাকে"""
     if not targets or not tickets:
         return []
 
-    # যদি টিকেটের সাথে বাজেট ট্যাগ থাকে তা বাদ দিয়ে শুধু সংখ্যা নেওয়া
     clean_tickets = [t[:-1] if (len(t) > 0 and isinstance(t[-1], str)) else t for t in tickets]
 
     results = all_combinations(number_from, number_to, result_size)
@@ -51,11 +49,15 @@ def find_violating_results(number_from, number_to, result_size, tickets, targets
             if failed:
                 violations.append((results[r_idx], failed))
 
+        # প্রতি ৫০,০০০ ড্র স্ক্যান হলে সাথে সাথে লাইভ লগ পাঠানো!
+        if log_cb and (b_end % 50000 == 0 or b_end == num_results):
+            pct_scanned = round((b_end / num_results) * 100, 1)
+            log_cb(f"🔍 ড্র স্ক্যান হচ্ছে: {b_end:,} / {num_results:,} ({pct_scanned}% অডিট সম্পন্ন)...")
+
     return violations
 
 
 def verify_ticket_set(number_from, number_to, result_size, tickets, targets=None):
-    """১০০% সব ড্র-এর বিরুদ্ধে ফাইনাল অডিট রিপোর্ট তৈরি করা"""
     targets = targets or {}
     results = all_combinations(number_from, number_to, result_size)
     if not results or not tickets:
