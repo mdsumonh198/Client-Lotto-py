@@ -114,7 +114,7 @@ if start_btn:
         status_box = st.empty()
         live_metrics = st.empty()
         
-       # রিয়েল-টাইম UI আপডেট কলব্যাক (ফিক্সড)
+        # রিয়েল-টাইম UI আপডেট কলব্যাক
         def on_round_update(round_no, max_rounds, tickets_count, pending_violations, message):
             pct = min(98, max(5, int((round_no / 35) * 100)))
             progress_bar.progress(pct)
@@ -124,7 +124,6 @@ if start_btn:
             </div>
             """, unsafe_allow_html=True)
             
-            # কমা ফরম্যাট ফিক্স
             v_display = f"{pending_violations:,}" if isinstance(pending_violations, int) else str(pending_violations)
             
             live_metrics.markdown(f"""
