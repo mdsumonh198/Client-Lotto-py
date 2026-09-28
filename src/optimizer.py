@@ -30,11 +30,17 @@ def optimize_with_constraint_generation(
     coverage_per_ticket = 127 if (ticket_size == 6 and result_size == 6 and target_k == 5) else 100
     lower_bound = max(1, total_draws // coverage_per_ticket)
 
+    # ভ্যারিয়েবলগুলো সবার শুরুতে ইনিশিয়ালাইজ করা হলো (যাতে কোনো ভ্যারিয়েবল এরর না আসে)
+    round_no = 1
+    last_covered = 0
+    last_pending = total_draws
+    last_pct = 0.0
+
     def send_log(msg, round_num=1, cur_tickets=0, covered=0, pending=total_draws, pct=0.0):
         if progress_callback:
             progress_callback(round_num, 20, cur_tickets, total_draws, covered, pending, pct, msg)
 
-    send_log(f"🚀 High-Density Engine শুরু হচ্ছে (তাত্ত্বিক বাউন্ড: ≥ {lower_bound} টিকেট)...")
+    send_log(f"🚀 High-Density Engine শুরু হচ্ছে (তাত্ত্বিক বাউন্ড: ≥ {lower_bound} টিকেট)...", round_num=1)
 
     # ২. সিমেট্রিক সাইক্লিক বেস টিকেট তৈরি
     selected_tickets = []
@@ -44,7 +50,7 @@ def optimize_with_constraint_generation(
     random.seed(42)
     sample_bases = random.sample(all_candidates, min(120, len(all_candidates)))
 
-    send_log("⚙️ সাইক্লিক বেস ব্লক প্রস্তুত হচ্ছে...", cur_tickets=0)
+    send_log("⚙️ সাইক্লিক বেস ব্লক প্রস্তুত হচ্ছে...", round_num=1, cur_tickets=0)
     for base in sample_bases:
         for shift in range(v_size):
             shifted = tuple(sorted([((x - number_from + shift) % v_size) + number_from for x in base]))
@@ -57,17 +63,12 @@ def optimize_with_constraint_generation(
         if len(selected_tickets) >= 2800:
             break
 
-    # ৩. কভারেজ বৃদ্ধি লুপ
+    # ৩. অবিরাম লাইভ ড্র স্ক্যানিং কলব্যাক
     def scan_cb(sub_msg):
         send_log(sub_msg, round_num=round_no, cur_tickets=len(selected_tickets), covered=last_covered, pending=last_pending, pct=last_pct)
 
-    last_covered = 0
-    last_pending = total_draws
-    last_pct = 0.0
-
     violations = find_violating_results(number_from, number_to, result_size, selected_tickets, targets, log_cb=scan_cb)
 
-    round_no = 1
     while violations and (time.time() - start_time) < (time_limit_seconds * 0.5):
         round_no += 1
         last_pending = len(violations)
