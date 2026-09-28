@@ -21,8 +21,8 @@ st.markdown("""
         border-radius: 8px; padding: 12px; margin-bottom: 8px;
     }
     .live-card {
-        background-color: #111827; border: 1px solid #374151;
-        border-radius: 8px; padding: 14px; text-align: center;
+        background-color: #111827; border: 1px solid #1f2937;
+        border-radius: 8px; padding: 12px; text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -104,7 +104,7 @@ with col_b2:
         st.session_state.results_output = None
         st.rerun()
 
-# ৪. লাইভ প্রগ্রেস ও অপ্টিমাইজেশন এক্সিকিউশন
+# ৪. লাইভ প্রগ্রেস ও ৫টি স্মার্ট মেট্রিক কার্ড
 if start_btn:
     if not st.session_state.targets:
         st.error("Please add at least one target from the sidebar!")
@@ -114,36 +114,52 @@ if start_btn:
         status_box = st.empty()
         live_metrics = st.empty()
         
-        # রিয়েল-টাইম UI আপডেট কলব্যাক
-        def on_round_update(round_no, max_rounds, tickets_count, pending_violations, message):
-            pct = min(98, max(5, int((round_no / 35) * 100)))
-            progress_bar.progress(pct)
+        start_time = time.time()
+
+        # লাইভ কলব্যাক ফাংশন
+        def on_round_update(round_no, max_rounds, tickets_count, total_draws, covered_draws, pending_violations, coverage_pct, message):
+            elapsed_sec = int(time.time() - start_time)
+            mins, secs = divmod(elapsed_sec, 60)
+            timer_str = f"{mins:02d}:{secs:02d}s"
+
+            # আসল কভারেজ শতাংশ দিয়ে প্রগ্রেস বার চলা
+            progress_bar.progress(min(100, int(coverage_pct)))
+            
             status_box.markdown(f"""
             <div class='metric-card' style='border-left: 4px solid #10b981;'>
                 <strong>🔄 {message}</strong>
             </div>
             """, unsafe_allow_html=True)
             
-            v_display = f"{pending_violations:,}" if isinstance(pending_violations, int) else str(pending_violations)
+            cov_str = f"{covered_draws:,} ({coverage_pct}%)" if isinstance(covered_draws, int) else str(covered_draws)
+            pen_str = f"{pending_violations:,}" if isinstance(pending_violations, int) else str(pending_violations)
             
+            # ৫টি সুন্দর লাইভ কার্ড
             live_metrics.markdown(f"""
-            <div style='display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px;'>
+            <div style='display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 10px;'>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 13px;'>Current Round</div>
-                    <div style='color: #38bdf8; font-size: 22px; font-weight: bold;'>Round {round_no}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'>⏱️ Elapsed Time</div>
+                    <div style='color: #f43f5e; font-size: 18px; font-weight: bold;'>{timer_str}</div>
                 </div>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 13px;'>Selected Tickets</div>
-                    <div style='color: #10b981; font-size: 22px; font-weight: bold;'>{tickets_count}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'>🔄 Current Round</div>
+                    <div style='color: #38bdf8; font-size: 18px; font-weight: bold;'>Round {round_no}</div>
                 </div>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 13px;'>Uncovered Violations</div>
-                    <div style='color: #f59e0b; font-size: 22px; font-weight: bold;'>{v_display}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'>🎟️ Selected Tickets</div>
+                    <div style='color: #10b981; font-size: 18px; font-weight: bold;'>{tickets_count}</div>
+                </div>
+                <div class='live-card'>
+                    <div style='color: #9ca3af; font-size: 12px;'>✅ Draws Complete</div>
+                    <div style='color: #22c55e; font-size: 18px; font-weight: bold;'>{cov_str}</div>
+                </div>
+                <div class='live-card'>
+                    <div style='color: #9ca3af; font-size: 12px;'>⚠️ Draws Remaining</div>
+                    <div style='color: #f59e0b; font-size: 18px; font-weight: bold;'>{pen_str}</div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-        start_time = time.time()
         try:
             out = optimize_with_constraint_generation(
                 int(number_from), int(number_to), int(ticket_size), int(result_size),
