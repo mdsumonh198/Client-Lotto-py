@@ -1,150 +1,90 @@
-import random
-import os
-import pandas as pd
-from .core import all_combinations
-from .solver_cp_sat import solve_min_tickets
-from .verifier import find_violating_results, verify_ticket_set
+from itertools import combinations
+from ortools.sat.python import cp_model
+from .core import all_combinations, to_mask
 
 
-CHECKPOINT_FILE = "latest_checkpoint_tickets.csv"
+def build_candidates(number_from, number_to, ticket_size):
+    return all_combinations(number_from, number_to, ticket_size)
 
 
-def optimize_with_constraint_generation(
+def solve_min_tickets(
     number_from,
     number_to,
     ticket_size,
     result_size,
     targets,
-    seed_constraint_count=100,
-    max_rounds=150,
+    constrained_results=None,
     time_limit_seconds=60,
-    max_constraints_per_round=300,
-    progress_callback=None,
 ):
-    all_results = all_combinations(number_from, number_to, result_size)
-    if not all_results:
-        raise ValueError("No possible results")
+    tickets = build_candidates(number_from, number_to, ticket_size)
+    ticket_masks = [to_mask(t) for t in tickets]
 
-    total_draws = len(all_results)
-    step = max(1, total_draws // seed_constraint_count)
-    constrained = [all_results[i] for i in range(0, total_draws, step)][:seed_constraint_count]
-    seen = set(constrained)
-    last = None
+    if constrained_results is None:
+        constrained_results = all_combinations(number_from, number_to, result_size)
 
-    last_covered = 0
-    last_pending = total_draws
-    last_pct = 0.0
+    model = cp_model.CpModel()
+    x = [model.NewBoolVar(f"x_{i}") for i in range(len(tickets))]
 
-    for round_no in range(1, max_rounds + 1):
-        if progress_callback:
-            progress_callback(
-                round_no=round_no,
-                max_rounds=max_rounds,
-                tickets_count=len(last["tickets"]) if last and "tickets" in last else 0,
-                total_draws=total_draws,
-                covered_draws=last_covered,
-                pending_violations=last_pending,
-                coverage_pct=last_pct,
-                message=f"MIP Round {round_no}: Solving with {len(constrained)} constraints..."
-            )
+    for ridx, result in enumerate(constrained_results):
+        rmask = to_mask(result)
+        for k, minimum in targets.items():
+            matching_indices = [i for i, tm in enumerate(ticket_masks) if (tm & rmask).bit_count() == k]
+            if minimum > 0:
+                if len(matching_indices) < minimum:
+                    return {
+                        "status": "INFEASIBLE",
+                        "tickets": [],
+                        "objective": None,
+                        "reason": f"Result {result} cannot reach exact-{k} >= {minimum}",
+                    }
+                model.Add(sum(x[i] for i in matching_indices) >= minimum)
 
-        last = solve_min_tickets(
-            number_from,
-            number_to,
-            ticket_size,
-            result_size,
-            targets,
-            constrained_results=constrained,
-            time_limit_seconds=time_limit_seconds,
-        )
-        
-        # প্রতি রাউন্ডের পাওয়া টিকেট সাথে সাথে ডিস্কে সেভ করা (যাতে কখনই ডেটা না হারায়)
-        if last and last.get("tickets"):
-            try:
-                cols = [f"N{i+1}" for i in range(len(last["tickets"][0]))]
-                pd.DataFrame(last["tickets"], columns=cols).to_csv(CHECKPOINT_FILE, index=False)
-            except Exception:
-                pass
+    # দ্রুত ইনিশিয়াল সমাধান দিয়ে ওয়ার্ম স্টার্ট
+    hint_indices = []
+    for r_idx in range(len(constrained_results)):
+        rmask = to_mask(constrained_results[r_idx])
+        for i, tm in enumerate(ticket_masks):
+            if (tm & rmask).bit_count() in targets:
+                hint_indices.append(i)
+                break
+    for h_idx in set(hint_indices):
+        model.AddHint(x[h_idx], 1)
 
-        if last["status"] in ("INFEASIBLE", "MODEL INVALID"):
-            return {"rounds": round_no, **last}
+    model.Minimize(sum(x))
+    solver = cp_model.CpSolver()
+    
+    # মেমোরি গার্ড: ২.৫ জিবির বেশি র‍্যাম কখনোই খরচ করবে না
+    solver.parameters.max_memory_in_mb = 2500
+    solver.parameters.num_search_workers = 1
+    
+    if time_limit_seconds:
+        solver.parameters.max_time_in_seconds = float(time_limit_seconds)
 
-        violations = find_violating_results(
-            number_from, number_to, result_size, last["tickets"], targets
-        )
-        
-        current_tickets = len(last["tickets"])
-        pending_count = len(violations)
-        covered_count = total_draws - pending_count
-        coverage_pct = round((covered_count / total_draws) * 100, 2)
-
-        last_covered = covered_count
-        last_pending = pending_count
-        last_pct = coverage_pct
-
-        if progress_callback:
-            progress_callback(
-                round_no=round_no,
-                max_rounds=max_rounds,
-                tickets_count=current_tickets,
-                total_draws=total_draws,
-                covered_draws=covered_count,
-                pending_violations=pending_count,
-                coverage_pct=coverage_pct,
-                message=f"Round {round_no} Done • Progress: {coverage_pct}% • Tickets: {current_tickets}"
-            )
-
-        if not violations:
-            verification = verify_ticket_set(
-                number_from, number_to, result_size, last["tickets"], targets
-            )
-            tagged_tickets = _tag_budget_steps(last["tickets"])
-            return {
-                "rounds": round_no,
-                **last,
-                "tickets": tagged_tickets,
-                "verification": verification,
-            }
-
-        random.shuffle(violations)
-        added = 0
-        for result, _failed in violations:
-            if result not in seen:
-                constrained.append(result)
-                seen.add(result)
-                added += 1
-                if added >= max_constraints_per_round:
-                    break
-
-        if added == 0:
-            break
-
-    verification = verify_ticket_set(
-        number_from, number_to, result_size, last["tickets"], targets
-    )
-    tagged_tickets = _tag_budget_steps(last.get("tickets", []))
-    return {
-        "rounds": max_rounds,
-        **(last or {}),
-        "tickets": tagged_tickets,
-        "verification": verification,
-        "status": "PROVED OPTIMAL" if verification["all_targets_pass"] else "BEST FOUND",
+    status_code = solver.Solve(model)
+    status_map = {
+        cp_model.OPTIMAL: "PROVED OPTIMAL",
+        cp_model.FEASIBLE: "BEST FOUND",
+        cp_model.INFEASIBLE: "INFEASIBLE",
+        cp_model.MODEL_INVALID: "MODEL INVALID",
+        cp_model.UNKNOWN: "BEST FOUND (TIMEOUT)",
     }
+    status = status_map.get(status_code, "BEST FOUND")
 
+    selected = []
+    for i in range(len(tickets)):
+        try:
+            if solver.Value(x[i]) == 1:
+                selected.append(tickets[i])
+        except Exception:
+            pass
 
-def _tag_budget_steps(tickets):
-    total = len(tickets)
-    if total == 0:
-        return []
-    tagged = []
-    step1_cutoff = max(1, int(total * 0.25))
-    step2_cutoff = max(1, int(total * 0.50))
-    for i, t in enumerate(tickets, 1):
-        if i <= step1_cutoff:
-            tier = "Step 1 (Starter - 25% Budget)"
-        elif i <= step2_cutoff:
-            tier = "Step 2 (Growth - 50% Budget)"
-        else:
-            tier = "Step 3 (Guaranteed - 100% Budget)"
-        tagged.append((*t, tier))
-    return tagged
+    if not selected and hint_indices:
+        selected = [tickets[i] for i in set(hint_indices)]
+        status = "BEST FOUND"
+
+    return {
+        "status": status,
+        "tickets": selected,
+        "objective": len(selected) if selected else None,
+        "best_bound": solver.BestObjectiveBound() if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
+    }
