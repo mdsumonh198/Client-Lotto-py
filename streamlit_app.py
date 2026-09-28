@@ -4,7 +4,6 @@ import time
 from src.core import validate_game, combination_count
 from src.optimizer import optimize_with_constraint_generation
 
-# ১. পেজ কনফিগারেশন ও প্রিমিয়াম ডার্ক স্টাইল
 st.set_page_config(page_title="Universal Lottery Optimizer", page_icon="🛡️", layout="wide")
 
 st.markdown("""
@@ -38,7 +37,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ২. সাইডবার (Universal Game Matrix & Compound Targets)
 with st.sidebar:
     st.header("⚙️ Universal Game Matrix")
     c1, c2 = st.columns(2)
@@ -90,10 +88,8 @@ with st.sidebar:
 
     st.divider()
     st.header("⚡ Optimization Engine Settings")
-    engine_mode = st.selectbox("Optimization Mode / Engine:", ["Complete Guaranteed Cover (Zero-Miss)", "Fast Coverage Heuristic"])
     time_limit = st.slider("Solver time limit per round (sec):", 10, 300, 60)
 
-# ৩. মূল ড্যাশবোর্ড হেডার
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
     st.markdown("### 🛡️ Universal Lottery / Combination Optimizer")
@@ -101,12 +97,10 @@ with col_h1:
 with col_h2:
     st.markdown("<div style='text-align: right;'><span class='badge'>100% EXHAUSTIVE GUARANTEE • ZERO MISS</span></div>", unsafe_allow_html=True)
 
-# একটিভ টার্গেট কার্ড
 if st.session_state.targets:
     target_text = " | ".join([f"Exact {k}-Match ≥ {v}" for k, v in sorted(st.session_state.targets.items())])
     st.markdown(f"<div class='metric-card' style='border-left: 4px solid #0284c7;'><strong>ACTIVE COMPOUND REQUIREMENTS:</strong><br><span style='color:#38bdf8;'>{target_text}</span></div>", unsafe_allow_html=True)
 
-# বড় সবুজ স্টার্ট ও রিসেট বাটন
 col_b1, col_b2 = st.columns([3, 1])
 with col_b1:
     start_btn = st.button("🚀 Start Combinatorial Optimization", type="primary", use_container_width=True)
@@ -115,7 +109,6 @@ with col_b2:
         st.session_state.results_output = None
         st.rerun()
 
-# ৪. লাইভ প্রগ্রেস ও রিয়েল-টাইম তথ্যবহুল ড্যাশবোর্ড
 if start_btn:
     if not st.session_state.targets:
         st.error("Please add at least one target from the sidebar!")
@@ -127,23 +120,19 @@ if start_btn:
         
         start_time = time.time()
 
-        # রিয়েল-টাইম UI আপডেট কলব্যাক
         def on_round_update(round_no, max_rounds, tickets_count, total_draws, covered_draws, pending_violations, coverage_pct, message):
             elapsed_sec = int(time.time() - start_time)
             mins, secs = divmod(elapsed_sec, 60)
             py_time = f"{mins:02d}:{secs:02d}s"
 
-            # আসল কভারেজ দিয়ে প্রগ্রেস বার চলা
             progress_bar.progress(min(100, int(coverage_pct)))
             
-            # প্রগ্রেস স্ট্যাটাস বক্স
             status_box.markdown(f"""
             <div class='metric-card' style='border-left: 4px solid #10b981;'>
                 <strong><span class='live-dot'></span>{message}</strong>
             </div>
             """, unsafe_allow_html=True)
             
-            # ৫টি সুন্দর লাইভ কার্ড (আসল বাস্তব সংখ্যা সহ)
             live_metrics.markdown(f"""
             <div style='display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 10px;'>
                 <div class='live-card'>
@@ -151,8 +140,8 @@ if start_btn:
                     <div id='live_sec_timer' style='color: #f43f5e; font-size: 19px; font-weight: bold;'>{py_time}</div>
                 </div>
                 <div class='live-card'>
-                    <div style='color: #9ca3af; font-size: 12px;'>🔄 Round Progress</div>
-                    <div style='color: #38bdf8; font-size: 19px; font-weight: bold;'>Round {round_no} / {max_rounds}</div>
+                    <div style='color: #9ca3af; font-size: 12px;'>🔄 Round</div>
+                    <div style='color: #38bdf8; font-size: 19px; font-weight: bold;'>Round {round_no}</div>
                 </div>
                 <div class='live-card'>
                     <div style='color: #9ca3af; font-size: 12px;'>🎟️ Tickets Generated</div>
@@ -194,24 +183,21 @@ if start_btn:
         except Exception as e:
             st.error(f"Optimization error: {str(e)}")
 
-# ৫. ফাইনাল ভেরিফিকেশন রিপোর্ট ও রেজাল্ট প্রদর্শন
 if "results_output" in st.session_state and st.session_state.results_output:
     out, elapsed = st.session_state.results_output
-    tickets = out.get("tickets", [])
+    raw_tickets = out.get("tickets", [])
     ver = out.get("verification", {})
     
     st.success(f"✅ Optimization Completed in {elapsed:.2f} seconds | Status: {out.get('status', 'PROVED OPTIMAL')}")
 
-    # টপ মেট্রিক কার্ডস
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Selected Tickets", len(tickets))
+    m1.metric("Total Selected Tickets", len(raw_tickets))
     m2.metric("Total Results Audited", f"{ver.get('total_results_checked', 0):,}")
     m3.metric("Rounds Solved", out.get("rounds", 1))
     m4.metric("Guarantee Status", "100% ZERO MISS" if ver.get("all_targets_pass") else "TARGET FAILED")
 
     st.divider()
 
-    # ভেরিফিকেশন রিপোর্ট টেবিল
     if ver and "stats" in ver:
         st.subheader("📊 Detailed Exact Match Breakdown")
         rows = []
@@ -231,15 +217,29 @@ if "results_output" in st.session_state and st.session_state.results_output:
         vdf = pd.DataFrame(rows)
         st.dataframe(vdf, use_container_width=True)
 
-    # টিকেটের তালিকা ও CSV ডাউনলোড বাটন
-    if tickets:
-        st.subheader("🎟️ Selected Minimal Ticket Combinations")
-        tdf = pd.DataFrame(tickets, columns=[f"N{i+1}" for i in range(len(tickets[0]))])
-        st.dataframe(tdf, use_container_width=True)
+    if raw_tickets:
+        st.subheader("🎟️ Selected Minimal Ticket Combinations (With Budget Steps)")
+        cols = [f"N{i+1}" for i in range(len(raw_tickets[0]) - 1)] + ["Budget Tier"]
+        tdf = pd.DataFrame(raw_tickets, columns=cols)
+        
+        # বাজেট ফিল্টার (কম বাজেটের ক্লায়েন্টদের জন্য)
+        budget_filter = st.selectbox("বাজেট অনুযায়ী টিকেট ফিল্টার করুন:", 
+                                     ["সব টিকেট (100% Zero-Miss Guarantee)", 
+                                      "Step 1 (Starter - 25% Budget)", 
+                                      "Step 2 (Growth - 50% Budget)"])
+        
+        if "Starter" in budget_filter:
+            filtered_df = tdf[tdf["Budget Tier"] == "Step 1 (Starter - 25% Budget)"]
+        elif "Growth" in budget_filter:
+            filtered_df = tdf[tdf["Budget Tier"].isin(["Step 1 (Starter - 25% Budget)", "Step 2 (Growth - 50% Budget)"])]
+        else:
+            filtered_df = tdf
+
+        st.dataframe(filtered_df, use_container_width=True)
         
         c_dl1, c_dl2 = st.columns(2)
         with c_dl1:
-            st.download_button("📥 Download Tickets CSV", tdf.to_csv(index=False).encode(), "optimized_tickets.csv", "text/csv", use_container_width=True)
+            st.download_button("📥 Download Filtered Tickets CSV", filtered_df.to_csv(index=False).encode(), "tickets_by_budget.csv", "text/csv", use_container_width=True)
         with c_dl2:
             if ver and "stats" in ver:
                 st.download_button("📥 Download Full Audit CSV", vdf.to_csv(index=False).encode(), "audit_report.csv", "text/csv", use_container_width=True)
