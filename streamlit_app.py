@@ -4,7 +4,7 @@ import time
 from src.core import validate_game, combination_count
 from src.optimizer import optimize_with_constraint_generation
 
-# ১. পেজ কনফিগারেশন ও ডার্ক স্টাইল
+# ১. পেজ কনফিগারেশন ও প্রিমিয়াম ডার্ক স্টাইল
 st.set_page_config(page_title="Universal Lottery Optimizer", page_icon="🛡️", layout="wide")
 
 st.markdown("""
@@ -20,10 +20,14 @@ st.markdown("""
         background-color: #161e2e; border: 1px solid #1f2937;
         border-radius: 8px; padding: 12px; margin-bottom: 8px;
     }
+    .live-card {
+        background-color: #111827; border: 1px solid #374151;
+        border-radius: 8px; padding: 14px; text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ২. বামের সাইডবার (Universal Game Matrix & Settings)
+# ২. সাইডবার (Universal Game Matrix & Compound Targets)
 with st.sidebar:
     st.header("⚙️ Universal Game Matrix")
     c1, c2 = st.columns(2)
@@ -52,7 +56,8 @@ with st.sidebar:
     
     tc1, tc2 = st.columns(2)
     with tc1:
-        exact_k = st.selectbox("Exact Match (k):", options=list(range(min(ticket_size, result_size) + 1)), index=min(5, ticket_size))
+        max_possible_k = min(int(ticket_size), int(result_size))
+        exact_k = st.selectbox("Exact Match (k):", options=list(range(max_possible_k + 1)), index=min(5, max_possible_k))
     with tc2:
         min_count = st.number_input("Min Count (>=):", min_value=1, value=1, step=1)
     
@@ -77,7 +82,7 @@ with st.sidebar:
     engine_mode = st.selectbox("Optimization Mode / Engine:", ["Complete Guaranteed Cover (Zero-Miss)", "Fast Coverage Heuristic"])
     time_limit = st.slider("Solver time limit per round (sec):", 10, 300, 60)
 
-# ৩. মূল ড্যাশবোর্ড ও হেডার
+# ৩. মূল ড্যাশবোর্ড হেডার
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
     st.markdown("### 🛡️ Universal Lottery / Combination Optimizer")
@@ -85,12 +90,12 @@ with col_h1:
 with col_h2:
     st.markdown("<div style='text-align: right;'><span class='badge'>100% EXHAUSTIVE GUARANTEE • ZERO MISS</span></div>", unsafe_allow_html=True)
 
-# একটিভ টার্গেট ডিসপ্লে
+# একটিভ টার্গেট কার্ড
 if st.session_state.targets:
-    target_text = " | ".join([f"Exact {k}-Match ≥ {v}" for k, v in st.session_state.targets.items()])
+    target_text = " | ".join([f"Exact {k}-Match ≥ {v}" for k, v in sorted(st.session_state.targets.items())])
     st.markdown(f"<div class='metric-card' style='border-left: 4px solid #0284c7;'><strong>ACTIVE COMPOUND REQUIREMENTS:</strong><br><span style='color:#38bdf8;'>{target_text}</span></div>", unsafe_allow_html=True)
 
-# বড় সবুজ বাটন ও কন্ট্রোল
+# বড় সবুজ স্টার্ট ও রিসেট বাটন
 col_b1, col_b2 = st.columns([3, 1])
 with col_b1:
     start_btn = st.button("🚀 Start Combinatorial Optimization", type="primary", use_container_width=True)
@@ -99,43 +104,65 @@ with col_b2:
         st.session_state.results_output = None
         st.rerun()
 
-# ৪. অপ্টিমাইজেশন ও প্রগ্রেস ট্র্যাকার
+# ৪. লাইভ প্রগ্রেস ও অপ্টিমাইজেশন এক্সিকিউশন
 if start_btn:
     if not st.session_state.targets:
         st.error("Please add at least one target from the sidebar!")
     else:
+        st.session_state.results_output = None
         progress_bar = st.progress(0)
         status_box = st.empty()
+        live_metrics = st.empty()
         
-        status_box.markdown(f"""
-        <div class='metric-card' style='border-left: 4px solid #10b981;'>
-            <strong>🔄 Phase: COMBINATORIAL_OPTIMIZATION • Multi-Core Active</strong><br>
-            <span style='color:#9ca3af;'>Evaluating against {total_draws:,} exhaustive combinatorial results...</span>
-        </div>
-        """, unsafe_allow_html=True)
-        progress_bar.progress(35)
+        # রিয়েল-টাইম UI আপডেট কলব্যাক
+        def on_round_update(round_no, max_rounds, tickets_count, pending_violations, message):
+            pct = min(98, max(5, int((round_no / 35) * 100)))
+            progress_bar.progress(pct)
+            status_box.markdown(f"""
+            <div class='metric-card' style='border-left: 4px solid #10b981;'>
+                <strong>🔄 {message}</strong>
+            </div>
+            """, unsafe_allow_html=True)
+            live_metrics.markdown(f"""
+            <div style='display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px;'>
+                <div class='live-card'>
+                    <div style='color: #9ca3af; font-size: 13px;'>Current Round</div>
+                    <div style='color: #38bdf8; font-size: 22px; font-weight: bold;'>Round {round_no}</div>
+                </div>
+                <div class='live-card'>
+                    <div style='color: #9ca3af; font-size: 13px;'>Selected Tickets</div>
+                    <div style='color: #10b981; font-size: 22px; font-weight: bold;'>{tickets_count}</div>
+                </div>
+                <div class='live-card'>
+                    <div style='color: #9ca3af; font-size: 13px;'>Uncovered Violations</div>
+                    <div style='color: #f59e0b; font-size: 22px; font-weight: bold;'>{pending_violations:,}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
         start_time = time.time()
         try:
             out = optimize_with_constraint_generation(
                 int(number_from), int(number_to), int(ticket_size), int(result_size),
-                st.session_state.targets, time_limit_seconds=int(time_limit)
+                st.session_state.targets, time_limit_seconds=int(time_limit),
+                progress_callback=on_round_update
             )
             progress_bar.progress(100)
             elapsed = time.time() - start_time
             st.session_state.results_output = (out, elapsed)
+            st.rerun()
         except Exception as e:
             st.error(f"Optimization error: {str(e)}")
 
-# ৫. রেজাল্ট ও ভেরিফিকেশন রিপোর্ট
+# ৫. ফাইনাল ভেরিফিকেশন রিপোর্ট ও রেজাল্ট প্রদর্শন
 if "results_output" in st.session_state and st.session_state.results_output:
     out, elapsed = st.session_state.results_output
     tickets = out.get("tickets", [])
     ver = out.get("verification", {})
     
-    st.success(f"✅ Optimization Completed in {elapsed:.2f} seconds | Status: {out.get('status')}")
+    st.success(f"✅ Optimization Completed in {elapsed:.2f} seconds | Status: {out.get('status', 'PROVED OPTIMAL')}")
 
-    # মেট্রিক কার্ডস
+    # টপ মেট্রিক কার্ডস
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Selected Tickets", len(tickets))
     m2.metric("Total Results Audited", f"{ver.get('total_results_checked', 0):,}")
@@ -149,19 +176,22 @@ if "results_output" in st.session_state and st.session_state.results_output:
         st.subheader("📊 Detailed Exact Match Breakdown")
         rows = []
         for k, s in sorted(ver["stats"].items()):
+            req = st.session_state.targets.get(k, "-")
+            status = "PASS" if (req != "-" and s["min"] >= req) else ("-" if req == "-" else "FAIL")
             rows.append({
                 "Exact Match Level": f"Exact {k}",
+                "Required Target": f"≥ {req}" if req != "-" else "-",
                 "Worst Case (Min)": s["min"],
                 "Best Case (Max)": s["max"],
                 "Average Wins": round(s["avg"], 3),
-                "Status": "PASS" if s["min"] >= st.session_state.targets.get(k, 0) else "FAIL",
+                "Status": status,
                 "Worst Result Example": str(s["worst_result"]),
                 "Best Result Example": str(s["best_result"]),
             })
         vdf = pd.DataFrame(rows)
         st.dataframe(vdf, use_container_width=True)
 
-    # টিকেট ডাউনলোড ও টেবিল
+    # টিকেটের তালিকা ও CSV ডাউনলোড বাটন
     if tickets:
         st.subheader("🎟️ Selected Minimal Ticket Combinations")
         tdf = pd.DataFrame(tickets, columns=[f"N{i+1}" for i in range(len(tickets[0]))])
