@@ -25,7 +25,6 @@ def solve_min_tickets(
     model = cp_model.CpModel()
     x = [model.NewBoolVar(f"x_{i}") for i in range(len(tickets))]
 
-    # কনস্ট্রেইন্ট যোগ করা
     for ridx, result in enumerate(constrained_results):
         rmask = to_mask(result)
         for k, minimum in targets.items():
@@ -40,26 +39,23 @@ def solve_min_tickets(
                     }
                 model.Add(sum(x[i] for i in matching_indices) >= minimum)
 
-    # WARM START HINT (যাতে সলভার কখনোই UNKNOWN বা ০ না দেয়)
-    # দ্রুত একটি ইনিশিয়াল ভ্যালিড সেট তৈরি করে হিন্ট দেওয়া
-    uncovered = set(range(len(constrained_results)))
+    # দ্রুত ইনিশিয়াল সমাধান দিয়ে ওয়ার্ম স্টার্ট
     hint_indices = []
     for r_idx in range(len(constrained_results)):
         rmask = to_mask(constrained_results[r_idx])
-        # ড্র এর সাথে মিল থাকা সেরা টিকেট খোঁজা
         for i, tm in enumerate(ticket_masks):
             if (tm & rmask).bit_count() in targets:
                 hint_indices.append(i)
                 break
-    
     for h_idx in set(hint_indices):
         model.AddHint(x[h_idx], 1)
 
     model.Minimize(sum(x))
     solver = cp_model.CpSolver()
     
-    # মাল্টি-কোর ব্যবহার করা (২ কোরের পূর্ণ শক্তি)
-    solver.parameters.num_search_workers = 2
+    # মেমোরি গার্ড: ২.৫ জিবির বেশি র‍্যাম কখনোই খরচ করবে না (ক্র্যাশ সম্পূর্ণ বন্ধ)
+    solver.parameters.max_memory_in_mb = 2500
+    solver.parameters.num_search_workers = 1  # ১টি ওয়ার্কার মেমোরি অনেক কম টানে
     
     if time_limit_seconds:
         solver.parameters.max_time_in_seconds = float(time_limit_seconds)
@@ -70,12 +66,11 @@ def solve_min_tickets(
         cp_model.FEASIBLE: "BEST FOUND",
         cp_model.INFEASIBLE: "INFEASIBLE",
         cp_model.MODEL_INVALID: "MODEL INVALID",
-        cp_model.UNKNOWN: "BEST FOUND (TIMEOUT)",  # ০ না দিয়ে সেরা সমাধান রিটার্ন করবে
+        cp_model.UNKNOWN: "BEST FOUND (TIMEOUT)",
     }
     status = status_map.get(status_code, "BEST FOUND")
 
     selected = []
-    # যদি সমাধান থাকে, অথবা টাইমআউটেও যা পেয়েছে তা সংগ্রহ করা
     for i in range(len(tickets)):
         try:
             if solver.Value(x[i]) == 1:
@@ -83,7 +78,6 @@ def solve_min_tickets(
         except Exception:
             pass
 
-    # যদি সলভার শূন্য দেয়, তবে হিন্টের সমাধানটি ব্যবহার করা (যাতে কখনই ০ না হয়)
     if not selected and hint_indices:
         selected = [tickets[i] for i in set(hint_indices)]
         status = "BEST FOUND"
