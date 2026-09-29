@@ -18,12 +18,10 @@ def _popcount_64(x):
 
 
 def find_violating_results(number_from, number_to, result_size, tickets, targets, log_cb=None):
-    """প্রতি ৫০,০০০ ড্র পরপর লাইভ স্ক্রিনে আপডেট পাঠানো যাতে লগ আটকে না থাকে"""
     if not targets or not tickets:
         return []
 
     clean_tickets = [t[:-1] if (len(t) > 0 and isinstance(t[-1], str)) else t for t in tickets]
-
     results = all_combinations(number_from, number_to, result_size)
     t_masks = np.array([to_mask(t) for t in clean_tickets], dtype=np.uint64)
     r_masks = np.array([to_mask(r) for r in results], dtype=np.uint64)
@@ -35,7 +33,6 @@ def find_violating_results(number_from, number_to, result_size, tickets, targets
     for b_start in range(0, num_results, batch_size):
         b_end = min(b_start + batch_size, num_results)
         batch_r = r_masks[b_start:b_end, None]
-
         intersections = batch_r & t_masks[None, :]
         matches = _popcount_64(intersections)
 
@@ -43,13 +40,12 @@ def find_violating_results(number_from, number_to, result_size, tickets, targets
             row_matches = matches[i]
             failed = {}
             for k, req in targets.items():
-                cnt = int(np.count_nonzero(row_matches == k))
+                cnt = int(np.count_nonzero(row_matches >= k))
                 if cnt < req:
                     failed[k] = (cnt, req)
             if failed:
                 violations.append((results[r_idx], failed))
 
-        # প্রতি ৫০,০০০ ড্র স্ক্যান হলে সাথে সাথে লাইভ লগ পাঠানো!
         if log_cb and (b_end % 50000 == 0 or b_end == num_results):
             pct_scanned = round((b_end / num_results) * 100, 1)
             log_cb(f"🔍 ড্র স্ক্যান হচ্ছে: {b_end:,} / {num_results:,} ({pct_scanned}% অডিট সম্পন্ন)...")
@@ -76,7 +72,6 @@ def verify_ticket_set(number_from, number_to, result_size, tickets, targets=None
     for b_start in range(0, num_results, batch_size):
         b_end = min(b_start + batch_size, num_results)
         batch_r = r_masks[b_start:b_end, None]
-
         intersections = batch_r & t_masks[None, :]
         matches = _popcount_64(intersections)
 
@@ -86,6 +81,14 @@ def verify_ticket_set(number_from, number_to, result_size, tickets, targets=None
     stats = {}
     for k in range(result_size + 1):
         vals = match_matrix_counts[k]
+        
+        # ৫-ম্যাচ বা তার বেশি হলে ৬-ম্যাচকেও (জ্যাকপট) যোগ করে আসল উইন হিসেব করা
+        if k in targets:
+            wins_combined = np.zeros(num_results, dtype=np.int32)
+            for hk in range(k, result_size + 1):
+                wins_combined += match_matrix_counts[hk]
+            vals = wins_combined
+
         min_idx = int(np.argmin(vals))
         max_idx = int(np.argmax(vals))
         stats[k] = {
