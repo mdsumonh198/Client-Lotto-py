@@ -125,20 +125,31 @@ def prune(p, sel, rng=None):
     return [s for s, kp in zip(sel, keep) if kp]
 
 
-def improve_lns(p, sel, rng, deadline, log=None, destroy_frac=0.08, patience=4):
+def improve_lns(p, sel, rng, deadline, log=None, destroy_frac=0.08, patience=4, max_destroy_frac=0.6):
     """Large-neighbourhood search: drop a random slice of tickets, greedily repair, prune, keep if not worse.
-    Stops after `patience` consecutive non-improving rounds or at the deadline. Result is always feasible."""
+    Never gives up on its own: after `patience` non-improving rounds it does NOT stop, it instead escalates
+    the destroy fraction (bigger perturbation, more chance to escape a local optimum) and keeps going until
+    the deadline. With no timeout (deadline far in the future) this keeps working as long as you let it run;
+    stop it early via the 'stop job' control if you want the current best sooner. Result is always feasible."""
     import time
-    best, fails, it = list(sel), 0, 0
-    while time.time() < deadline and fails < patience and len(best) > 1:
+    best, fails, it, frac = list(sel), 0, 0, destroy_frac
+    stagnant_rounds = 0
+    while time.time() < deadline and len(best) > 1:
         it += 1
-        k = max(1, int(len(best) * destroy_frac))
+        k = max(1, int(len(best) * frac))
         keep = [best[i] for i in rng.permutation(len(best))[k:]]
         cand = prune(p, greedy_cover(p, start=keep, rng=rng), rng)
         if len(cand) < len(best):
-            best, fails = cand, 0
+            best, fails, frac, stagnant_rounds = cand, 0, destroy_frac, 0
             if log:
                 log(f"   LNS round {it}: improved -> {len(best)} tickets")
         else:
             fails += 1
+            if fails >= patience:
+                frac = min(max_destroy_frac, frac * 1.6)     # escalate: bigger shake-up, keep trying
+                fails = 0
+                stagnant_rounds += 1
+                if log and stagnant_rounds % 3 == 0:
+                    log(f"   LNS round {it}: no improvement in a while, widening search "
+                        f"(destroy_frac={frac:.2f}) -> still {len(best)} tickets")
     return best

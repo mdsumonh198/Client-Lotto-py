@@ -25,7 +25,7 @@ def optimize_with_constraint_generation(
     targets,
     seed_constraint_count=40,
     batch_size=100,
-    max_rounds=1000,
+    max_rounds=10 ** 9,     # effectively unlimited; only the deadline (or a manual stop) ends the search
     time_limit_seconds=600,
     workers=None,
     threads=None,
