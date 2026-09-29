@@ -1,203 +1,261 @@
-import streamlit as st
-import pandas as pd
+import os
+import re
 import time
-import threading
-from src.core import validate_game, combination_count
-from src.optimizer import optimize_with_constraint_generation
 
-st.set_page_config(page_title="Universal Lottery Optimizer", page_icon="🛡️", layout="wide")
+import streamlit as st
 
-st.markdown("""
-<style>
-    .stApp { background-color: #0b0f19; color: #f3f4f6; }
-    .console-box {
-        background-color: #030712; color: #10b981; font-family: monospace;
-        padding: 14px; border-radius: 8px; border: 1px solid #1f2937;
-        height: 180px; overflow-y: auto; font-size: 13px; line-height: 1.6;
-    }
-    .metric-card {
-        background-color: #111827; border: 1px solid #1f2937;
-        border-radius: 8px; padding: 12px; text-align: center;
-    }
-</style>
-""", unsafe_allow_html=True)
+import config
+from src import jobs
+from src.core import combination_count, validate_game
+from src.export import tickets_frame, verification_frame
 
-st.title("Universal Lottery / Combination Optimizer")
-st.caption("Complete Guaranteed Cover Engine & 100% Exhaustive Combinatorial Verification (OR-Tools, SCIP, Gurobi)")
+st.set_page_config(page_title="Universal Combination Optimizer", layout="wide")
+st.title("লটারি / কম্বিনেশন অপ্টিমাইজার")
+st.caption("একবার 'শুরু করুন' চাপলে হিসাব সার্ভারেই আলাদাভাবে চলতে থাকে। ব্রাউজার বন্ধ করলে বা এই পেজ রিলোড "
+           "করলেও কাজ থামবে না — পরে আবার এই পেজ খুললেই চলমান/শেষ হওয়া কাজ দেখা যাবে।")
 
-# ১. গেম ম্যাট্রিক্স ইনপুট
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    number_from = st.number_input("Number From", min_value=0, max_value=40, value=1, step=1)
-with c2:
-    number_to = st.number_input("Number To", min_value=0, max_value=40, value=27, step=1)
-with c3:
-    ticket_size = st.number_input("Ticket Size", min_value=1, max_value=40, value=6, step=1)
-with c4:
-    result_size = st.number_input("Result Size", min_value=1, max_value=40, value=6, step=1)
+_SHORT_RE = re.compile(r"([\d,]+)\s+results still short")
 
-# ২. টার্গেট সিলেকশন (ইনপুট বক্স)
-st.subheader("Exact-match minimum targets")
-max_k = int(min(ticket_size, result_size))
-target_inputs = {}
-cols = st.columns(max_k + 1)
-for k in range(max_k + 1):
-    with cols[k]:
-        # step=None দিলে কোনো - বা + বাটন থাকবে না, একদম ক্লিন বক্স হবে
-        default_val = 1 if k == 5 else 0
-        v = st.number_input(f"Exact {k} min", min_value=0, value=default_val, step=1, key=f"k_{k}")
-        if v > 0:
-            target_inputs[k] = int(v)
 
-# ৩. সলভার সেটিংস
-st.subheader("Solver settings")
-s_col1, s_col2, s_col3 = st.columns([2, 2, 2])
-with s_col1:
-    time_limit = st.number_input("Total time limit (seconds)", min_value=10, value=600, step=10)
-with s_col2:
-    workers = st.number_input("CP-SAT workers", min_value=1, max_value=16, value=4, step=1)
-with s_col3:
-    st.write("")
-    st.write("")
-    use_cp_sat = st.checkbox("Use CP-SAT exact solver", value=True)
+def _plain_message(raw):
+    if "greedy" in raw and "results still short" in raw:
+        return "প্রাথমিক টিকেট সেট তৈরি হচ্ছে..."
+    if "greedy+prune" in raw:
+        return "অপ্রয়োজনীয় টিকেট বাদ দেওয়া হচ্ছে..."
+    if "CP-SAT" in raw or "round" in raw:
+        return "টিকেট সংখ্যা আরও কমানো যায় কিনা যাচাই হচ্ছে (প্রমাণিত সমাধান খোঁজা হচ্ছে)..."
+    if "LNS" in raw:
+        return "শেষ ধাপে আরও কম টিকেটে সমাধান খোঁজা হচ্ছে..."
+    if "Tickets:" in raw:
+        return "গেম হিসাব করা হচ্ছে..."
+    return "কাজ চলছে..."
 
-# মোট কম্বিনেশন তথ্য
-total_draws = combination_count(int(number_from), int(number_to), int(result_size))
-total_tickets = combination_count(int(number_from), int(number_to), int(ticket_size))
-st.write(f"Possible tickets: **{total_tickets:,}** | Possible results: **{total_draws:,}**")
 
-# ৪. স্টার্ট বাটন ও লাইভ প্রগ্রেস ট্র্যাকার
-if st.button("Start Optimization", type="primary", use_container_width=True):
-    if not target_inputs:
-        st.error("অন্তত একটি টার্গেট বক্সে ১ বা তার বেশি সংখ্যা দিন!")
+def _fmt_elapsed(sec):
+    if sec is None:
+        return "00:00:00"
+    sec = int(sec)
+    h, r = divmod(sec, 3600)
+    m, s2 = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{s2:02d}"
+
+
+def _progress_fraction(log_lines, n_results):
+    for line in reversed(log_lines):
+        m = _SHORT_RE.search(line)
+        if m and n_results:
+            short = int(m.group(1).replace(",", ""))
+            return max(0.0, min(1.0, 1 - short / n_results))
+    return None
+
+
+_RE_LB = re.compile(r"Counting lower bound: (\d+)")
+_RE_PRUNE_DONE = re.compile(r"greedy\+prune -> (\d+) tickets")
+_RE_FULL_MODEL = re.compile(r"status=\S+ candidate=\S+ lower_bound=(\d+) best=(\d+)")
+_RE_ROUND = re.compile(r"round (\d+): status=\S+ candidate=\S+ lower_bound=(\d+) best=(\d+)")
+_RE_LNS = re.compile(r"LNS round (\d+): improved -> (\d+) tickets")
+
+
+def _parse_state(log_lines):
+    """Scan the whole log so far and build a picture of: which phase we're in, the best
+    ticket count found so far, and the proven mathematical lower bound (if known)."""
+    state = {"phase": 1, "phase_name": "ধাপ ১/৩: প্রাথমিক টিকেট সেট তৈরি হচ্ছে",
+             "best": None, "lower_bound": None, "round": None}
+    for line in log_lines:
+        if m := _RE_LB.search(line):
+            state["lower_bound"] = int(m.group(1))
+        if m := _SHORT_RE.search(line):
+            pass  # handled by _progress_fraction separately
+        if m := _RE_PRUNE_DONE.search(line):
+            state["best"] = int(m.group(1))
+            state["phase"] = 2
+            state["phase_name"] = "ধাপ ২/৩: টিকেট সংখ্যা প্রমাণসহ কমানো হচ্ছে (CP-SAT)"
+        if "CP-SAT skipped" in line:
+            state["phase"] = 3
+            state["phase_name"] = "ধাপ ৩/৩: বাকি সময়ে আরও কম টিকেট খোঁজা হচ্ছে (LNS)"
+        if m := _RE_FULL_MODEL.search(line):
+            state["lower_bound"] = int(m.group(1))
+            state["best"] = min(state["best"], int(m.group(2))) if state["best"] else int(m.group(2))
+            state["phase"] = 2
+        if m := _RE_ROUND.search(line):
+            state["round"] = int(m.group(1))
+            state["lower_bound"] = int(m.group(2))
+            state["best"] = min(state["best"], int(m.group(3))) if state["best"] else int(m.group(3))
+            state["phase"] = 2
+        if "Step 3: LNS" in line:
+            state["phase"] = 3
+            state["phase_name"] = "ধাপ ৩/৩: বাকি সময়ে আরও কম টিকেট খোঁজা হচ্ছে (LNS)"
+        if m := _RE_LNS.search(line):
+            state["best"] = min(state["best"], int(m.group(2))) if state["best"] else int(m.group(2))
+            state["phase"] = 3
+    return state
+
+
+def _render_result(result):
+    if result["status"] == "INFEASIBLE":
+        st.error("❌ এই গেমে আপনার টার্গেট কোনোভাবেই সম্ভব না। কারণ:")
+        st.error(result.get("reason"))
+        return
+
+    ver = result["verification"]
+    ver["stats"] = {int(k): v for k, v in ver["stats"].items()}
+    ver["targets"] = {int(k): v for k, v in ver["targets"].items()}
+    all_pass = ver["all_targets_pass"]
+
+    if all_pass:
+        st.success(
+            f"✅ **টার্গেট গ্যারান্টেড।** সম্ভাব্য {ver['total_results_checked']:,} টা ড্রয়ের প্রতিটার "
+            f"বিপরীতে যাচাই করা হয়েছে — সবচেয়ে খারাপ অবস্থাতেও (worst case) আপনার টার্গেট মিলবে।"
+        )
     else:
-        st.session_state.results_output = None
-        
-        # লাইভ এলিমেন্টস
-        progress_bar = st.progress(0, text="📊 প্রস্তুতি চলছে... 0% সম্পন্ন")
-        live_cards = st.empty()
-        console_display = st.empty()
-        
-        log_lines = [f"[  0.0s] Tickets: {total_tickets:,} | Results: {total_draws:,} | Engine Started..."]
+        st.error("⚠️ যাচাইয়ে সমস্যা পাওয়া গেছে — টার্গেট সব ড্রয়ে মিলছে না। এই ফলাফল ব্যবহার করবেন না।")
 
-        shared_state = {
-            "round": 1,
-            "tickets": 0,
-            "covered": 0,
-            "pending": total_draws,
-            "pct": 0.0,
-            "message": "Initializing High-Speed Combinatorial Engine...",
-            "done": False,
-            "output": None,
-            "error": None
-        }
+    proof_note = (
+        "এই সংখ্যাটাই সর্বনিম্ন — গাণিতিকভাবে প্রমাণিত।" if result["status"] == "PROVED OPTIMAL"
+        else "এটা এখন পর্যন্ত পাওয়া সেরা (সর্বনিম্ন) সংখ্যা। আরও কম সম্ভব কিনা নিশ্চিত না।"
+    )
+    def _fmt(sec):
+        sec = int(sec)
+        h, r = divmod(sec, 3600)
+        m, s2 = divmod(r, 60)
+        return f"{h:02d}:{m:02d}:{s2:02d}"
 
-        start_time = time.time()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("মোট টিকেট", result["objective"])
+    m2.metric("⏱️ মোট সময় লেগেছে", _fmt(result["elapsed_seconds"]))
+    m3.metric("প্রমাণিত সর্বনিম্ন?", "হ্যাঁ" if result["status"] == "PROVED OPTIMAL" else "না")
+    st.caption(proof_note)
 
-        def live_callback(round_no, max_rounds, tickets_count, total_d, covered_d, pending_d, coverage_pct, message):
-            shared_state["round"] = round_no
-            shared_state["tickets"] = tickets_count
-            shared_state["covered"] = covered_d
-            shared_state["pending"] = pending_d
-            shared_state["pct"] = coverage_pct
-            shared_state["message"] = message
-            elapsed = time.time() - start_time
-            log_lines.append(f"[{elapsed:5.1f}s] {message}")
-            if len(log_lines) > 8:
-                log_lines.pop(0)
+    st.subheader("প্রতিটা টার্গেট লেভেলের ফলাফল (worst case)")
+    for k, t in sorted(ver["targets"].items()):
+        icon = "✅" if t["pass"] else "❌"
+        st.write(f"{icon} ঠিক {k}টা মিললে: দরকার কমপক্ষে {t['required']}টা, সবচেয়ে খারাপ ড্রয়ে পাওয়া গেছে {t['worst_case']}টা")
 
-        # ব্যাকগ্রাউন্ড থ্রেড
-        safe_from = int(number_from)
-        safe_to = int(number_to)
-        safe_k = int(ticket_size)
-        safe_m = int(result_size)
-        safe_time = int(time_limit)
-        safe_targets = dict(target_inputs)
-        safe_workers = int(workers)
+    tdf = tickets_frame(result["tickets"])
+    if len(tdf):
+        st.subheader(f"টিকেট তালিকা ({len(tdf)}টা)")
+        st.dataframe(tdf, use_container_width=True)
+        st.download_button("টিকেট CSV ডাউনলোড করুন", tdf.to_csv(index=False).encode(), "tickets.csv", "text/csv")
 
-        def worker():
-            try:
-                res = optimize_with_constraint_generation(
-                    safe_from, safe_to, safe_k, safe_m,
-                    safe_targets, time_limit_seconds=safe_time,
-                    workers=safe_workers, use_cp_sat=use_cp_sat,
-                    progress_callback=live_callback
-                )
-                shared_state["output"] = res
-            except Exception as e:
-                shared_state["error"] = str(e)
-            finally:
-                shared_state["done"] = True
+    with st.expander("বিস্তারিত ভেরিফিকেশন রিপোর্ট"):
+        vdf = verification_frame(ver)
+        st.dataframe(vdf, use_container_width=True)
+        st.download_button("ভেরিফিকেশন CSV ডাউনলোড করুন", vdf.to_csv(index=False).encode(), "verification.csv", "text/csv")
 
-        threading.Thread(target=worker, daemon=True).start()
 
-        # মেইন থ্রেড: প্রতি ১ সেকেন্ডে লাইভ স্ক্রিন আপডেট করবে!
-        while not shared_state["done"]:
-            elapsed_sec = int(time.time() - start_time)
-            mins, secs = divmod(elapsed_sec, 60)
-            t_str = f"{mins:02d}:{secs:02d}s"
+# ---------------------------------------------------------------------------
+last_job_id = jobs.get_last_job_id()
+running_status = jobs.get_status(last_job_id) if last_job_id else None
 
-            pct_val = min(100.0, max(0.0, float(shared_state["pct"])))
-            progress_bar.progress(int(pct_val), text=f"📊 সামগ্রিক কভারেজ অগ্রগতি: {pct_val:.2f}% সম্পন্ন | আর {100 - pct_val:.2f}% বাকি (টার্গেট: ১০০% জিরো-মিস)")
+if running_status and (running_status["running"] or running_status["result"]):
+    st.subheader("চলমান / সবশেষ কাজ")
+    cfg = running_status["cfg"]
+    st.write(f"গেম: {cfg['from']}–{cfg['to']}, টিকেটে {cfg['ticket']}টা, ড্রয়ে {cfg['result']}টা, "
+             f"টার্গেট: {cfg['targets']}")
+    n_results = combination_count(cfg["from"], cfg["to"], cfg["result"])
 
-            # লাইভ ৪টি কার্ড
-            live_cards.markdown(f"""
-            <div style='display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px;'>
-                <div class='metric-card'><span style='color:#9ca3af;font-size:12px;'>⏱️ Elapsed Time</span><br><b style='color:#f43f5e;font-size:20px;'>{t_str}</b></div>
-                <div class='metric-card'><span style='color:#9ca3af;font-size:12px;'>🎟️ Tickets Generated</span><br><b style='color:#10b981;font-size:20px;'>{shared_state['tickets']} টি</b></div>
-                <div class='metric-card'><span style='color:#9ca3af;font-size:12px;'>✅ Draws Complete</span><br><b style='color:#22c55e;font-size:20px;'>{shared_state['covered']:,}</b></div>
-                <div class='metric-card'><span style='color:#9ca3af;font-size:12px;'>🎯 Draws Remaining</span><br><b style='color:#f59e0b;font-size:20px;'>{shared_state['pending']:,} টি</b></div>
-            </div>
-            """, unsafe_allow_html=True)
+    if running_status["running"]:
+        st.info("🟢 কাজ চলছে (ব্যাকগ্রাউন্ডে, সার্ভারে)। **কোনো সময়সীমা নাই** — যতক্ষণ না সর্বনিম্ন টিকেট সংখ্যা "
+                "পাওয়া যায় (অথবা আপনি নিজে বন্ধ করেন), ততক্ষণ চলবে।")
+        pstate = _parse_state(running_status["log_lines"])
+        tcol1, tcol2 = st.columns(2)
+        tcol1.metric("⏱️ এখন পর্যন্ত সময় লেগেছে", _fmt_elapsed(running_status["elapsed_seconds"]))
+        tcol2.metric("বর্তমান ধাপ", f"{pstate['phase']}/৩")
+        st.write(f"**{pstate['phase_name']}**")
 
-            # লাইভ টার্মিনাল লগ বক্স
-            log_html = "<br>".join(log_lines)
-            console_display.markdown(f"<div class='console-box'>{log_html}</div>", unsafe_allow_html=True)
+        frac = _progress_fraction(running_status["log_lines"], n_results)
+        if pstate["phase"] == 1:
+            st.progress(frac or 0, text=f"কভারেজ: {(frac or 0) * 100:.1f}% সম্পন্ন")
+        else:
+            st.progress(1.0, text="ধাপ ১ সম্পন্ন (সব সম্ভাব্য ড্র কভার হয়ে গেছে)")
 
-            time.sleep(1)
+        if pstate["best"] is not None:
+            b1, b2 = st.columns(2)
+            b1.metric("🎟️ এখন পর্যন্ত সেরা", f"{pstate['best']:,} টিকেট")
+            if pstate["lower_bound"] is not None:
+                b2.metric("📐 গাণিতিক সর্বনিম্ন সীমা", f"{pstate['lower_bound']:,} টিকেট")
+                closeness = min(1.0, pstate["lower_bound"] / pstate["best"]) if pstate["best"] else 0
+                st.progress(closeness, text=f"সর্বনিম্নের কতটা কাছে: {closeness * 100:.1f}% "
+                                             f"(১০০% মানে গাণিতিকভাবে প্রমাণিত সর্বনিম্ন পাওয়া গেছে)")
+                st.caption("এই দুইটা সংখ্যা যত কাছাকাছি আসবে, তত নিশ্চিত হওয়া যাবে যে আর কম টিকেট সম্ভব না।")
+            if pstate["round"] is not None:
+                st.caption(f"রাউন্ড সংখ্যা: {pstate['round']}")
 
-        progress_bar.progress(100, text="✅ ১০০% অপ্টিমাইজেশন ও ব্রুট-ফোর্স অডিট সম্পন্ন!")
-        if shared_state["error"]:
-            st.error(f"Error: {shared_state['error']}")
-        elif shared_state["output"]:
-            st.session_state.results_output = (shared_state["output"], time.time() - start_time)
+        last_msg = running_status["log_lines"][-1] if running_status["log_lines"] else ""
+        st.write(_plain_message(last_msg))
+        with st.expander("টেকনিক্যাল লগ"):
+            st.code("\n".join(running_status["log_lines"][-25:]))
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔄 রিফ্রেশ করুন"):
+                st.rerun()
+        with c2:
+            if st.button("⛔ কাজ বন্ধ করুন"):
+                jobs.stop_job(last_job_id)
+                st.rerun()
+        auto = st.checkbox("প্রতি ৪ সেকেন্ডে নিজে থেকে রিফ্রেশ হোক", value=True)
+        if auto:
+            time.sleep(4)
             st.rerun()
-
-# ৫. ফাইনাল রেজাল্ট প্রদর্শন
-if "results_output" in st.session_state and st.session_state.results_output:
-    out, elapsed = st.session_state.results_output
-    raw_tickets = out.get("tickets", [])
-    ver = out.get("verification", {})
-
-    st.success(f"✅ Optimization Completed in {elapsed:.2f} seconds | Status: {out.get('status', 'PROVED OPTIMAL')}")
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Selected Tickets", len(raw_tickets))
-    m2.metric("Total Results Audited", f"{ver.get('total_results_checked', 0):,}")
-    m3.metric("Rounds Solved", out.get("rounds", 1))
-    m4.metric("Guarantee Status", "100% ZERO MISS" if ver.get("all_targets_pass") else "TARGET FAILED")
+    elif running_status["crashed"]:
+        st.error("এই কাজটা শেষ হওয়ার আগেই থেমে গেছে (ক্র্যাশ)। নিচে টেকনিক্যাল লগ দেখুন।")
+        st.code("\n".join(running_status["log_lines"][-40:]))
+    else:
+        st.success("এই কাজ শেষ হয়ে গেছে। ফলাফল নিচে:")
+        _render_result(running_status["result"])
 
     st.divider()
+    st.subheader("নতুন গেম চালাতে চান?")
+else:
+    st.subheader("গেম সেট করুন")
 
-    # ভেরিফিকেশন রিপোর্ট
-    if ver and "stats" in ver:
-        st.subheader("📊 Detailed Exact Match Breakdown")
-        rows = []
-        for k, s in sorted(ver["stats"].items()):
-            rows.append({
-                "Exact Match": f"Exact {k}",
-                "Worst Case (Min)": s["min"],
-                "Best Case (Max)": s["max"],
-                "Average": round(s["avg"], 3),
-                "Worst Result": str(s["worst_result"]),
-                "Best Result": str(s["best_result"]),
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+# ---------------------------------------------------------------------------
+disabled_new = bool(running_status and running_status["running"])
+if disabled_new:
+    st.warning("একটা কাজ এখনো চলছে। নতুন কাজ শুরু করার আগে সেটা শেষ হতে দিন, অথবা উপরে থেকে বন্ধ করুন।")
 
-    # টিকেট টেবিল ও ডাউনলোড
-    if raw_tickets:
-        st.subheader("🎟️ Selected Minimal Ticket Combinations")
-        cols = [f"N{i+1}" for i in range(len(raw_tickets[0]) - 1)] + ["Budget Tier"] if isinstance(raw_tickets[0][-1], str) else [f"N{i+1}" for i in range(len(raw_tickets[0]))]
-        tdf = pd.DataFrame(raw_tickets, columns=cols)
-        st.dataframe(tdf, use_container_width=True)
-        st.download_button("📥 Download Tickets CSV", tdf.to_csv(index=False).encode(), "tickets.csv", "text/csv")
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    number_from = st.number_input("নম্বর শুরু (From)", min_value=0, max_value=40, value=1, step=1, disabled=disabled_new)
+with c2:
+    number_to = st.number_input("নম্বর শেষ (To)", min_value=0, max_value=40, value=25, step=1, disabled=disabled_new)
+with c3:
+    ticket_size = st.number_input("এক টিকেটে কয়টা নম্বর", min_value=1, max_value=41, value=6, step=1, disabled=disabled_new)
+with c4:
+    result_size = st.number_input("ড্রয়ে কয়টা নম্বর ওঠে", min_value=1, max_value=41, value=6, step=1, disabled=disabled_new)
+
+st.caption('উদাহরণ: "ঠিক 5 মিললে, কমপক্ষে 1 টা টিকেট" মানে — যেকোনো সম্ভাব্য ড্রয়ে, আপনার টিকেটের মধ্যে অন্তত '
+           '১টা টিকেট থাকতেই হবে যেটায় ঠিক ৫টা নম্বর মিলবে।')
+max_k = int(min(ticket_size, result_size))
+selected_targets = {}
+cols = st.columns(min(max_k + 1, 6))
+for k in range(max_k + 1):
+    with cols[k % len(cols)]:
+        v = st.number_input(f"ঠিক {k}টা মিললে, কমপক্ষে কয়টা টিকেট", min_value=0, value=0, step=1,
+                             key=f"k{k}", disabled=disabled_new)
+        if v > 0:
+            selected_targets[k] = int(v)
+
+with st.expander("অ্যাডভান্সড সেটিংস (শুধু দেখার জন্য, অ্যাডমিন ঠিক করে দিয়েছে)"):
+    o1, o2, o3 = st.columns(3)
+    with o1:
+        st.text_input("মোট সময়সীমা", value=("কোনো সময়সীমা নাই" if not config.TIME_LIMIT_SECONDS
+                                            else f"{int(config.TIME_LIMIT_SECONDS)} সেকেন্ড"), disabled=True)
+    with o2:
+        st.number_input("CP-SAT workers", value=int(config.WORKERS), disabled=True)
+        st.number_input("NumPy threads", value=int(config.THREADS), disabled=True)
+    with o3:
+        st.checkbox("CP-SAT exact solver ব্যবহার হবে", value=bool(config.USE_CP_SAT), disabled=True)
+
+if st.button("▶️ অপ্টিমাইজেশন শুরু করুন", type="primary", disabled=disabled_new):
+    try:
+        validate_game(int(number_from), int(number_to), int(ticket_size), int(result_size))
+        if not selected_targets:
+            st.error("অন্তত একটা টার্গেট দিন।")
+            st.stop()
+        cfg = {"from": int(number_from), "to": int(number_to), "ticket": int(ticket_size),
+               "result": int(result_size), "targets": selected_targets}
+        jobs.start_job(cfg, config.TIME_LIMIT_SECONDS, config.WORKERS, config.THREADS, config.USE_CP_SAT)
+        st.rerun()
+    except Exception as e:
+        st.error(f"সমস্যা হয়েছে: {e}")

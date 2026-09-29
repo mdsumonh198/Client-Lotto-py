@@ -1,8 +1,26 @@
 """Core utilities: bit-mask combinations, vectorised popcount, Problem definition."""
+import os
+from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
 from math import comb
 
 import numpy as np
+
+THREADS = os.cpu_count() or 1      # NumPy releases the GIL on big array ops, so threads scale
+
+
+def set_threads(n):
+    global THREADS
+    THREADS = max(1, int(n or (os.cpu_count() or 1)))
+
+
+def pmap(fn, items):
+    """Ordered parallel map over items using THREADS threads."""
+    items = list(items)
+    if THREADS <= 1 or len(items) <= 1:
+        return [fn(x) for x in items]
+    with ThreadPoolExecutor(THREADS) as ex:
+        return list(ex.map(fn, items))
 
 
 # ----------------------------------------------------------------------------
@@ -88,21 +106,24 @@ def mask_to_numbers(mask, offset: int = 0):
     return tuple(out)
 
 
-def overlap_counts(rmasks: np.ndarray, tmasks: np.ndarray, k1: int, chunk_elems: int = 4_000_000) -> np.ndarray:
+def overlap_counts(rmasks: np.ndarray, tmasks: np.ndarray, k1: int, chunk_elems: int = 2_000_000) -> np.ndarray:
     """
     For every result, count how many tickets share EXACTLY k numbers, for k = 0..k1-1.
-    Returns int32 array of shape [len(rmasks), k1].  Exact - no sampling.
+    Returns int32 array of shape [len(rmasks), k1].  Exact - no sampling. Multi-threaded over result chunks.
     """
     R, T = len(rmasks), len(tmasks)
     out = np.zeros((R, k1), dtype=np.int32)
     if T == 0 or R == 0:
         return out
-    step = max(1, chunk_elems // T)
-    for s in range(0, R, step):
-        rm = rmasks[s:s + step]
+    step = max(1, min(chunk_elems // T, -(-R // (THREADS * 2))))
+
+    def work(s0):
+        rm = rmasks[s0:s0 + step]
         ov = popcount(rm[:, None] & tmasks[None, :]).astype(np.int64)
         ov += (np.arange(len(rm), dtype=np.int64) * k1)[:, None]
-        out[s:s + step] = np.bincount(ov.ravel(), minlength=len(rm) * k1).reshape(len(rm), k1)
+        out[s0:s0 + step] = np.bincount(ov.ravel(), minlength=len(rm) * k1).reshape(len(rm), k1)
+
+    pmap(work, range(0, R, step))
     return out
 
 
@@ -138,6 +159,11 @@ class Problem:
             )
         self.tmasks = combo_masks(self.N, self.t)
         self.rmasks = self.tmasks if self.t == self.s else combo_masks(self.N, self.s)
+        self._rorder = np.argsort(self.rmasks, kind="stable")
+        self._rsorted = self.rmasks[self._rorder]
+        self._ci_cache = {}
+        self._bitvals = [np.uint64(1) << np.uint64(i) for i in range(self.N)]
+        self.terms_per_ticket = sum(_C(self.t, k) * _C(self.N - self.t, self.s - k) for k in self.ks)
 
     # -- sizes
     @property
@@ -155,9 +181,37 @@ class Problem:
     def tickets_as_numbers(self, idx):
         return sorted(self.numbers(self.tmasks[i]) for i in idx)
 
+    # -- sparse lookup: indices of results sharing EXACTLY k numbers with a ticket (no scan of all results)
+    def _ci(self, n, k):
+        key = (n, k)
+        if key not in self._ci_cache:
+            if k == 0:
+                self._ci_cache[key] = np.zeros((1, 0), dtype=np.intp)
+            else:
+                self._ci_cache[key] = np.array(list(combinations(range(n), k)), dtype=np.intp).reshape(-1, k)
+        return self._ci_cache[key]
+
+    def exact_overlap_results(self, tmask, k):
+        tmask = int(tmask)
+        if _C(self.t, k) * _C(self.N - self.t, self.s - k) > self.n_results // 8:   # dense is cheaper
+            return np.flatnonzero(popcount(self.rmasks & np.uint64(tmask)) == k)
+        inside = np.array([self._bitvals[i] for i in range(self.N) if (tmask >> i) & 1], dtype=np.uint64)
+        outside = np.array([self._bitvals[i] for i in range(self.N) if not (tmask >> i) & 1], dtype=np.uint64)
+        a = inside[self._ci(len(inside), k)].sum(axis=1, dtype=np.uint64)
+        b = outside[self._ci(len(outside), self.s - k)].sum(axis=1, dtype=np.uint64)
+        masks = (a[:, None] | b[None, :]).ravel()
+        return self._rorder[np.searchsorted(self._rsorted, masks)]
+
     # -- counts of exact-k matches restricted to the target levels: [R, len(ks)]
     def target_counts(self, ticket_masks):
-        return overlap_counts(self.rmasks, np.asarray(ticket_masks, dtype=np.uint64), self.k1)[:, self.ks]
+        ticket_masks = np.asarray(ticket_masks, dtype=np.uint64)
+        if self.terms_per_ticket <= self.n_results // 4:
+            cnt = np.zeros((self.n_results, len(self.ks)), dtype=np.int32)
+            for tm in ticket_masks:
+                for j, k in enumerate(self.ks):
+                    cnt[self.exact_overlap_results(tm, k), j] += 1
+            return cnt
+        return overlap_counts(self.rmasks, ticket_masks, self.k1)[:, self.ks]
 
     # -- math facts (valid for every game by symmetry)
     def infeasible_reason(self):

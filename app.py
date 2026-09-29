@@ -30,8 +30,9 @@ def main():
     ap.add_argument("--ticket", type=int)
     ap.add_argument("--result", type=int)
     ap.add_argument("--targets", type=str, help="e.g. 5:1,4:10,3:25")
-    ap.add_argument("--time", type=float, default=600, help="TOTAL time budget in seconds (default 600)")
+    ap.add_argument("--time", type=float, default=0, help="TOTAL time budget in seconds. 0 (default) = NO TIMEOUT, runs until proven/best minimum is found or interrupted")
     ap.add_argument("--workers", type=int, default=None, help="CP-SAT workers (default: max(8, cpu cores))")
+    ap.add_argument("--threads", type=int, default=None, help="NumPy threads for greedy/prune/verify (default: cpu cores)")
     ap.add_argument("--gap", type=float, default=0.0, help="stop CP-SAT at this relative gap, e.g. 0.05 (faster, no proof)")
     ap.add_argument("--no-exact", action="store_true", help="skip CP-SAT, heuristic + exact verification only (fastest)")
     ap.add_argument("--exact-limit", type=int, default=150_000, help="max candidate tickets for CP-SAT model")
@@ -55,7 +56,7 @@ def main():
     t0 = time.time()
     out = optimize_with_constraint_generation(
         a.nfrom, a.nto, a.ticket, a.result, targets,
-        time_limit_seconds=a.time, workers=a.workers, gap=a.gap, use_cp_sat=not a.no_exact,
+        time_limit_seconds=a.time, workers=a.workers, threads=a.threads, gap=a.gap, use_cp_sat=not a.no_exact,
         max_exact_tickets=a.exact_limit, seed=a.seed,
         log=lambda m: print(f"[{time.time() - t0:7.1f}s] {m}", flush=True),
     )

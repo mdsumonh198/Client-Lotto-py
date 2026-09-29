@@ -2,22 +2,24 @@
 Feasibility is always confirmed by the exact verifier afterwards."""
 import numpy as np
 
-from .core import popcount
+from .core import popcount, pmap
+from . import core as _core
 
 _CHUNK = 4_000_000
 
 
 def _gain_all(p, tm, rm, needpos):
     T, S = len(tm), len(rm)
-    gain = np.zeros(T, dtype=np.int32)
-    step = max(1, _CHUNK // S)
-    for s0 in range(0, T, step):
+    step = max(1, min(_CHUNK // S, -(-T // (_core.THREADS * 2))))
+
+    def work(s0):
         ov = popcount(tm[s0:s0 + step, None] & rm[None, :])
         g = np.zeros(ov.shape[0], dtype=np.int32)
         for j, k in enumerate(p.ks):
             g += ((ov == k) & needpos[:, j][None, :]).sum(axis=1, dtype=np.int32)
-        gain[s0:s0 + step] = g
-    return gain
+        return g
+
+    return np.concatenate(pmap(work, range(0, T, step)))
 
 
 def _gain_one(p, tmask, rm, needpos):
@@ -89,16 +91,18 @@ def greedy_cover(p, start=(), rng=None, sub_size=600, pass_ops=20_000_000, log=N
                 break
         if not new:
             raise RuntimeError("Greedy stalled (should be impossible for a feasible game).")
-        for c in new:                                  # update global deficits
-            ov = popcount(p.rmasks & p.tmasks[c])
+        for c in new:                                  # update global deficits (sparse, no full scan)
             for j, k in enumerate(p.ks):
-                deficit[:, j] -= ((ov == k) & (deficit[:, j] > 0))
+                idx = p.exact_overlap_results(p.tmasks[c], k)
+                d = deficit[idx, j]
+                deficit[idx, j] = d - (d > 0)
         if log:
             log(f"   greedy: {len(sel)} tickets, {int((deficit.sum(axis=1) > 0).sum()):,} results still short")
 
 
 def prune(p, sel, rng=None):
-    """Drop redundant tickets while keeping every target satisfied for every result."""
+    """Drop redundant tickets while keeping every target satisfied for every result (sparse: touches only the
+    results each ticket actually affects)."""
     rng = rng or np.random.default_rng(1)
     sel = list(sel)
     if not sel:
@@ -106,17 +110,17 @@ def prune(p, sel, rng=None):
     cnt = p.target_counts(p.tmasks[sel]).astype(np.int32)
     keep = np.ones(len(sel), dtype=bool)
     for pos in rng.permutation(len(sel)):
-        ov = popcount(p.rmasks & p.tmasks[sel[pos]])
-        masks, ok = [], True
+        tm = p.tmasks[sel[pos]]
+        idxs, ok = [], True
         for j, k in enumerate(p.ks):
-            m = ov == k
-            if (cnt[m, j] - 1 < p.reqs[j]).any():
+            idx = p.exact_overlap_results(tm, k)
+            if (cnt[idx, j] - 1 < p.reqs[j]).any():
                 ok = False
                 break
-            masks.append(m)
+            idxs.append(idx)
         if ok:
-            for j, m in enumerate(masks):
-                cnt[m, j] -= 1
+            for j, idx in enumerate(idxs):
+                cnt[idx, j] -= 1
             keep[pos] = False
     return [s for s, kp in zip(sel, keep) if kp]
 

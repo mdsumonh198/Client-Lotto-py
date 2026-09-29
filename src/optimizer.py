@@ -1,21 +1,20 @@
+"""Orchestrator:  greedy warm start -> incremental CP-SAT constraint generation -> exact final verification.
+
+Status meaning (never over-claimed):
+  PROVED OPTIMAL : verified feasible set whose size == a mathematically valid lower bound.
+  BEST FOUND     : verified feasible set, but no proof that fewer tickets are impossible.
+  INFEASIBLE     : proved impossible (even using every possible ticket).
+"""
+import math
+import os
 import time
-import random
+
 import numpy as np
-from .core import all_combinations, to_mask
-from .verifier import verify_ticket_set, find_violating_results
 
-
-def _popcount_64(x):
-    m1 = np.uint64(0x5555555555555555)
-    m2 = np.uint64(0x3333333333333333)
-    m4 = np.uint64(0x0F0F0F0F0F0F0F0F)
-    x -= (x >> np.uint64(1)) & m1
-    x = (x & m2) + ((x >> np.uint64(2)) & m2)
-    x = (x + (x >> np.uint64(4))) & m4
-    x += x >> np.uint64(8)
-    x += x >> np.uint64(16)
-    x += x >> np.uint64(32)
-    return (x & np.uint64(0x7F)).astype(np.int32)
+from .core import Problem, _C, set_threads
+from .heuristic import greedy_cover, improve_lns, prune
+from .solver_cp_sat import HAS_ORTOOLS, IncrementalModel
+from .verifier import verify_problem
 
 
 def optimize_with_constraint_generation(
@@ -24,185 +23,124 @@ def optimize_with_constraint_generation(
     ticket_size,
     result_size,
     targets,
-    seed_constraint_count=100,
-    max_rounds=50,
+    seed_constraint_count=40,
+    batch_size=100,
+    max_rounds=1000,
     time_limit_seconds=600,
-    workers=4,
+    workers=None,
+    threads=None,
+    gap=0.0,
     use_cp_sat=True,
-    progress_callback=None,
-    **kwargs
+    seed=12345,
+    max_exact_tickets=150_000,
+    full_model_max_terms=25_000_000,
+    log=None,
 ):
-    start_time = time.time()
-    v_size = number_to - number_from + 1
-    
-    all_results = all_combinations(number_from, number_to, result_size)
-    total_draws = len(all_results)
-    r_masks = np.array([to_mask(r) for r in all_results], dtype=np.uint64)
+    t0 = time.time()
+    log = log or (lambda *_: None)
+    set_threads(threads)
+    workers = int(workers or max(8, os.cpu_count() or 1))   # >=8 enables CP-SAT LNS portfolio
+    rng = np.random.default_rng(seed)
+    total_budget = float(time_limit_seconds) if time_limit_seconds else 10 ** 9
+    deadline = t0 + total_budget
 
-    target_k = max(targets.keys()) if targets else 5
-    coverage_per_ticket = 127 if (ticket_size == 6 and result_size == 6 and target_k == 5) else 100
-    lower_bound = max(1, total_draws // coverage_per_ticket)
+    p = Problem(number_from, number_to, ticket_size, result_size, targets)
+    from . import core as _c
+    log(f"Tickets: {p.n_tickets:,} | Results: {p.n_results:,} | CP-SAT workers: {workers} | NumPy threads: {_c.THREADS}")
 
-    round_no = 1
-    last_covered = 0
-    last_pending = total_draws
-    last_pct = 0.0
+    reason = p.infeasible_reason()
+    if reason:
+        return {"status": "INFEASIBLE", "reason": reason, "tickets": [], "objective": None, "rounds": 0,
+                "lower_bound": None, "elapsed_seconds": time.time() - t0}
 
-    def send_log(msg, round_num=1, cur_tickets=0, covered=0, pending=total_draws, pct=0.0):
-        if progress_callback:
-            progress_callback(round_num, 10, cur_tickets, total_draws, covered, pending, pct, msg)
+    if not p.targets:                                   # nothing to guarantee
+        rep = verify_problem(p, [], {})
+        return {"status": "PROVED OPTIMAL", "tickets": [], "objective": 0, "rounds": 0, "lower_bound": 0,
+                "verification": rep, "elapsed_seconds": time.time() - t0}
 
-    send_log(f"🚀 Maximum-Coverage Minimal Engine শুরু হচ্ছে (তাত্ত্বিক বাউন্ড: ≥ {lower_bound} টিকেট)...", round_num=1)
+    lb = p.counting_lower_bound()
+    log(f"Counting lower bound: {lb}")
 
-    # ১. সাইক্লিক সিমেট্রিক কোর তৈরি (৮৭টি বেস ব্লক মডিউলো শিফট = ২,৩৪৯ টিকেট)
-    selected_tickets = []
-    selected_masks_set = set()
+    log("Step 1: fast greedy warm start ...")
+    best = prune(p, greedy_cover(p, rng=rng, log=log), rng)
+    log(f"   greedy+prune -> {len(best)} tickets (verified feasible)")
 
-    all_candidates = all_combinations(number_from, number_to, ticket_size)
-    random.seed(42)
-    
-    # তাত্ত্বিক অপ্টিমাল অনুযায়ী বেস ব্লক নির্বাচন
-    num_bases = min(87 if v_size == 27 else 80, len(all_candidates))
-    sample_bases = random.sample(all_candidates, num_bases)
+    rounds = 0
+    exact_possible = use_cp_sat and HAS_ORTOOLS and p.n_tickets <= max_exact_tickets
+    terms_per_result = sum(_C(p.s, k) * _C(p.N - p.s, p.t - k) for k in p.ks)
+    full_ok = (terms_per_result * p.n_results <= full_model_max_terms
+               and p.n_results * p.n_tickets <= 300_000_000)
 
-    send_log("⚙️ সাইক্লিক বেস ব্লক থেকে অপ্টিমাল কোর টিকেট তৈরি হচ্ছে...", round_num=1, cur_tickets=0)
-    for base in sample_bases:
-        for shift in range(v_size):
-            shifted = tuple(sorted([((x - number_from + shift) % v_size) + number_from for x in base]))
-            s_mask = to_mask(shifted)
-            if s_mask not in selected_masks_set:
-                selected_masks_set.add(s_mask)
-                selected_tickets.append(shifted)
-
-    send_log(f"✅ প্রাথমিক সাইক্লিক সেট তৈরি সম্পন্ন: {len(selected_tickets)} টিকেট। ড্র অডিট চলছে...", 
-             round_num=1, cur_tickets=len(selected_tickets))
-
-    # ২. ড্র স্ক্যানিং
-    def scan_cb(sub_msg):
-        send_log(sub_msg, round_num=round_no, cur_tickets=len(selected_tickets), covered=last_covered, pending=last_pending, pct=last_pct)
-
-    violations = find_violating_results(number_from, number_to, result_size, selected_tickets, targets, log_cb=scan_cb)
-
-    # ৩. ম্যাক্সিমাম কভারেজ গ্রিডি ফিল (কোনো বাড়তি ফালতু টিকেট নেওয়া হবে না)
-    while violations and len(selected_tickets) < 2500:
-        round_no += 1
-        last_pending = len(violations)
-        last_covered = total_draws - last_pending
-        last_pct = round((last_covered / total_draws) * 100, 2)
-
-        send_log(f"⚡ বাকি {len(violations):,}টি ড্র কভার করার জন্য ম্যাক্সিমাম কভারেজ টিকেট খোঁজা হচ্ছে...",
-                 round_num=round_no, cur_tickets=len(selected_tickets), covered=last_covered, pending=last_pending, pct=last_pct)
-
-        # আনকভার্ড ড্র-গুলোর বিটমাস্ক
-        v_draws = [v[0] for v in violations]
-        v_masks = np.array([to_mask(d) for d in v_draws[:500]], dtype=np.uint64)
-
-        # এমন সেরা টিকেট খোঁজা যা একাই সবচেয়ে বেশি আনকভার্ড ড্র কভার করে
-        best_candidate = None
-        best_coverage = 0
-
-        # ভায়োলেশন ড্র গুলো থেকেই সবচেয়ে উপযুক্ত ক্যান্ডিডেট বের করা
-        candidate_pool = []
-        for d in v_draws[:50]:
-            for ext in range(number_from, number_to + 1):
-                if ext not in d:
-                    cand = tuple(sorted(d[:ticket_size - 1] + (ext,)))
-                    c_m = to_mask(cand)
-                    if c_m not in selected_masks_set:
-                        candidate_pool.append((cand, c_m))
-                        if len(candidate_pool) >= 100:
-                            break
-            if len(candidate_pool) >= 100:
+    if len(best) > lb and exact_possible and full_ok:
+        # Small / medium game: put EVERY result in one exact model -> no rounds, solution is feasible by construction.
+        log("Step 2: full exact CP-SAT model (all results as constraints) ...")
+        inc = IncrementalModel(p)
+        for r in range(p.n_results):
+            inc.add_result(r)
+        rounds = 1
+        status, cand, bound = inc.solve(best, max(2.0, deadline - time.time()), workers, gap)
+        if bound is not None:
+            lb = max(lb, math.ceil(bound - 1e-6))
+        log(f"   status={status} candidate={len(cand) if cand else None} lower_bound={lb} best={len(best)}")
+        if cand is not None and len(cand) < len(best):
+            if not (p.target_counts(p.tmasks[cand]) >= p.reqs[None, :]).all():
+                raise RuntimeError("Internal error: full-model candidate failed verification.")
+            best = cand
+    elif len(best) > lb and exact_possible:
+        log("Step 2: CP-SAT constraint generation ...")
+        inc = IncrementalModel(p)
+        for r in rng.choice(p.n_results, size=min(seed_constraint_count, p.n_results), replace=False):
+            inc.add_result(r)
+        round_cap = max(10.0, 0.2 * total_budget)
+        while rounds < max_rounds and len(best) > lb:
+            remaining = deadline - time.time()
+            if remaining < 2:
+                log("   time budget finished")
                 break
+            rounds += 1
+            status, cand, bound = inc.solve(best, min(remaining, round_cap), workers, gap)
+            if bound is not None:
+                lb = max(lb, math.ceil(bound - 1e-6))
+            log(f"   round {rounds}: status={status} candidate={len(cand) if cand else None} "
+                f"lower_bound={lb} best={len(best)} constraints={len(inc.added)}")
+            if cand is None:
+                break
+            deficit = np.maximum(p.reqs[None, :] - p.target_counts(p.tmasks[cand]), 0)
+            tot = deficit.sum(axis=1)
+            viol = np.flatnonzero(tot)
+            if viol.size == 0:                          # candidate passes ALL results
+                if len(cand) < len(best):
+                    best = cand
+                if status == "OPTIMAL":
+                    break
+                continue                                # only FEASIBLE: keep improving while budget remains
+            fixed = prune(p, greedy_cover(p, start=cand, rng=rng), rng)   # cheap feasible repair -> better upper bound
+            if len(fixed) < len(best):
+                best = fixed
+            if viol.size > batch_size:
+                score = tot[viol] + rng.random(viol.size)
+                viol = viol[np.argpartition(-score, batch_size - 1)[:batch_size]]
+            if not sum(inc.add_result(r) for r in viol):
+                break
+    elif len(best) > lb:
+        log("CP-SAT skipped (disabled / not installed / game too large for exact model) -> heuristic result only")
 
-        # সর্বোচ্চ ড্র কভার করা টিকেটটি বেছে নেওয়া
-        for cand, c_m in candidate_pool:
-            cov_count = int(np.count_nonzero(_popcount_64(v_masks & c_m) >= target_k))
-            if cov_count > best_coverage:
-                best_coverage = cov_count
-                best_candidate = (cand, c_m)
+    # ---- use leftover time (only if not proved) to shrink the set further with LNS
+    if len(best) > lb and time.time() < deadline - 3:
+        log("Step 3: LNS improvement with remaining time ...")
+        best = improve_lns(p, best, rng, deadline, log)
 
-        if best_candidate and best_candidate[1] not in selected_masks_set:
-            selected_masks_set.add(best_candidate[1])
-            selected_tickets.append(best_candidate[0])
-        else:
-            # যদি বেস্ট ক্যান্ডিডেট না পাওয়া যায় তবে প্রথম ড্র-এর জন্য একটি টিকেট
-            first_draw = v_draws[0]
-            for ext in range(number_from, number_to + 1):
-                if ext not in first_draw:
-                    cand = tuple(sorted(first_draw[:ticket_size - 1] + (ext,)))
-                    c_m = to_mask(cand)
-                    if c_m not in selected_masks_set:
-                        selected_masks_set.add(c_m)
-                        selected_tickets.append(cand)
-                        break
-
-        violations = find_violating_results(number_from, number_to, result_size, selected_tickets, targets, log_cb=scan_cb)
-        if not violations:
-            break
-
-    # ৪. সিঙ্গেল টিকেট ছাঁটাই (গ্যারান্টি অক্ষুণ্ণ রেখে অপ্রয়োজনীয় টিকেট ডিলিট)
-    send_log(f"✂️ ড্র কভারেজ সম্পন্ন! এখন ডুপ্লিকেট টিকেট ছাঁটাই চলছে...",
-             round_num=round_no + 1, cur_tickets=len(selected_tickets), covered=total_draws, pending=0, pct=100.0)
-
-    t_masks = np.array([to_mask(t) for t in selected_tickets], dtype=np.uint64)
-    num_t = len(t_masks)
-
-    draw_cover_counts = np.zeros(total_draws, dtype=np.int16)
-    batch_size = 5000
-    for b_start in range(0, total_draws, batch_size):
-        b_end = min(b_start + batch_size, total_draws)
-        batch_r = r_masks[b_start:b_end, None]
-        m = _popcount_64(batch_r & t_masks[None, :])
-        draw_cover_counts[b_start:b_end] = np.sum(m >= target_k, axis=1)
-
-    active_indices = list(range(num_t))
-    random.shuffle(active_indices)
-
-    pruned_indices = set()
-    for idx in active_indices:
-        t_m = t_masks[idx]
-        matches = _popcount_64(r_masks & t_m)
-        covered_draw_indices = np.where(matches >= target_k)[0]
-
-        if np.all(draw_cover_counts[covered_draw_indices] > 1):
-            pruned_indices.add(idx)
-            draw_cover_counts[covered_draw_indices] -= 1
-
-    final_tickets = [selected_tickets[i] for i in range(num_t) if i not in pruned_indices]
-
-    send_log(f"🎉 ছাঁটাই সফল! চূড়ান্ত সর্বনিম্ন টিকেট সংখ্যা: {len(final_tickets)} টি। ফাইনাল অডিট চলছে...",
-             round_num=round_no + 2, cur_tickets=len(final_tickets), covered=total_draws, pending=0, pct=100.0)
-
-    # ৫. চূড়ান্ত ১০০% ব্রুট-ফোর্স ভেরিফিকেশন
-    verification = verify_ticket_set(number_from, number_to, result_size, final_tickets, targets)
-    tagged_tickets = _tag_budget_steps(final_tickets)
-
-    status = "PROVED OPTIMAL (100% ZERO-MISS)" if verification["all_targets_pass"] and len(final_tickets) <= (lower_bound * 1.08) else "BEST FOUND (100% ZERO-MISS)"
-
+    # ---- final EXACT verification against every possible result
+    report = verify_problem(p, p.tmasks[best])
+    if not report["all_targets_pass"]:
+        raise RuntimeError("Internal error: final verification failed.")
+    proved = len(best) <= lb
     return {
-        "status": status,
-        "rounds": round_no,
-        "tickets": tagged_tickets,
-        "objective": len(final_tickets),
-        "verification": verification,
+        "status": "PROVED OPTIMAL" if proved else "BEST FOUND",
+        "tickets": p.tickets_as_numbers(best),
+        "objective": len(best),
+        "lower_bound": int(lb),
+        "rounds": rounds,
+        "verification": report,
+        "elapsed_seconds": time.time() - t0,
     }
-
-
-def _tag_budget_steps(tickets):
-    total = len(tickets)
-    if total == 0:
-        return []
-    tagged = []
-    step1_cutoff = max(1, int(total * 0.25))
-    step2_cutoff = max(1, int(total * 0.50))
-    for i, t in enumerate(tickets, 1):
-        clean_nums = t[:-1] if isinstance(t[-1], str) else t
-        if i <= step1_cutoff:
-            tier = "Step 1 (Starter - 25% Budget)"
-        elif i <= step2_cutoff:
-            tier = "Step 2 (Growth - 50% Budget)"
-        else:
-            tier = "Step 3 (Guaranteed - 100% Budget)"
-        tagged.append((*clean_nums, tier))
-    return tagged
